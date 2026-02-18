@@ -346,3 +346,71 @@ class Camera:
     def stop_recording(self):
         p.stopStateLogging(self.rec_id)
         p.configureDebugVisualizer(p.COV_ENABLE_GUI, 1)
+
+
+class LinkCamera:
+    """A camera whose pose is driven by a link in the simulation.
+
+    This is useful for head-mounted sensors. Each capture call computes the
+    view matrix from the current link transform.
+    """
+
+    def __init__(
+        self,
+        near: float,
+        far: float,
+        size: tuple[int, int],
+        fov: float,
+        parent_to_camera_xyz=(0.0, 0.0, 0.0),
+        parent_to_camera_rpy=(0.0, 0.0, 0.0),
+        forward_axis=(1.0, 0.0, 0.0),
+        up_axis=(0.0, 0.0, 1.0),
+    ):
+        self.width, self.height = size
+        self.near, self.far = float(near), float(far)
+        self.fov = float(fov)
+
+        aspect = self.width / self.height
+        self.projection_matrix = p.computeProjectionMatrixFOV(self.fov, aspect, self.near, self.far)
+
+        self.parent_to_camera_xyz = tuple(float(v) for v in parent_to_camera_xyz)
+        self.parent_to_camera_rpy = tuple(float(v) for v in parent_to_camera_rpy)
+        self.parent_to_camera_quat = p.getQuaternionFromEuler(self.parent_to_camera_rpy)
+
+        self.forward_axis = tuple(float(v) for v in forward_axis)
+        self.up_axis = tuple(float(v) for v in up_axis)
+
+    @staticmethod
+    def _rotate_vec(quat_xyzw, v):
+        """Rotate a 3D vector by quaternion (x,y,z,w)."""
+        m = p.getMatrixFromQuaternion(quat_xyzw)
+        # m is row-major 3x3
+        x = m[0] * float(v[0]) + m[1] * float(v[1]) + m[2] * float(v[2])
+        y = m[3] * float(v[0]) + m[4] * float(v[1]) + m[5] * float(v[2])
+        z = m[6] * float(v[0]) + m[7] * float(v[1]) + m[8] * float(v[2])
+        return (x, y, z)
+
+    def get_cam_img(self, robot_id: int, link_index: int):
+        """Render RGB, depth, seg from a link.
+
+        Args:
+            robot_id: pybullet bodyUniqueId
+            link_index: pybullet link index (joint index for the child link)
+        """
+        link_pos, link_orn = p.getLinkState(robot_id, link_index, computeForwardKinematics=True)[0:2]
+
+        cam_pos, cam_orn = p.multiplyTransforms(
+            link_pos,
+            link_orn,
+            self.parent_to_camera_xyz,
+            self.parent_to_camera_quat,
+        )
+
+        forward_world = self._rotate_vec(cam_orn, self.forward_axis)
+        up_world = self._rotate_vec(cam_orn, self.up_axis)
+
+        target = [cam_pos[0] + forward_world[0], cam_pos[1] + forward_world[1], cam_pos[2] + forward_world[2]]
+        view_matrix = p.computeViewMatrix(cam_pos, target, up_world)
+
+        _w, _h, rgb, depth, seg = p.getCameraImage(self.width, self.height, view_matrix, self.projection_matrix)
+        return rgb[:, :, 0:3], depth, seg

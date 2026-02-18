@@ -1,4 +1,4 @@
-from environment.utilities import setup_sisbot, setup_dual_arm_sisbot, Camera
+from environment.utilities import setup_sisbot, setup_dual_arm_sisbot, Camera, LinkCamera
 import math
 import time
 import numpy as np
@@ -175,7 +175,8 @@ class Environment:
         # -----------------------------
         # Load from an absolute path to make relative mesh paths reliable.
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        dual_urdf_path = os.path.join(repo_root, "environment", "urdf", "dual_arm_robot.urdf")
+        # dual_urdf_path = os.path.join(repo_root, "environment", "urdf", "dual_arm_robot.urdf")
+        dual_urdf_path = os.path.join(repo_root, "environment", "urdf", "full_stationary_robot.urdf")
 
         self.robot_id = p.loadURDF(
             dual_urdf_path,
@@ -203,6 +204,33 @@ class Environment:
             self.joint_id_to_movable_index,
             self.link_name_to_id,
         ) = setup_dual_arm_sisbot(p, self.robot_id, gripper_type)
+
+        # -----------------------------
+        # Head-mounted camera (Kinect)
+        # -----------------------------
+        # Prefer an optical frame if present (ROS convention: Z forward, Y down).
+        if "head_mount_kinect_rgb_optical_frame" in self.link_name_to_id:
+            self._head_camera_link_name = "head_mount_kinect_rgb_optical_frame"
+        elif "head_mount_kinect_link" in self.link_name_to_id:
+            self._head_camera_link_name = "head_mount_kinect_link"
+        else:
+            self._head_camera_link_name = None
+
+        self.head_camera = None
+        if self._head_camera_link_name is not None:
+            self.head_camera = LinkCamera(
+                near=float(camera.near),
+                far=float(camera.far),
+                size=(int(camera.width), int(camera.height)),
+                fov=float(camera.fov),
+                # If we are using an optical frame, use ROS optical axes.
+                forward_axis=(0.0, 0.0, 1.0)
+                if self._head_camera_link_name.endswith("_optical_frame")
+                else (1.0, 0.0, 0.0),
+                up_axis=(0.0, -1.0, 0.0)
+                if self._head_camera_link_name.endswith("_optical_frame")
+                else (0.0, 0.0, 1.0),
+            )
 
         if "left_tool0" not in self.link_name_to_id or "right_tool0" not in self.link_name_to_id:
             raise RuntimeError("Could not find left_tool0/right_tool0 in loaded URDF.")
@@ -323,6 +351,13 @@ class Environment:
                                   (-0.8, 0.8),
                                   (0.785, 1.4))
         self.reset_robot()
+
+    def get_head_cam_img(self):
+        """Return (rgb, depth, seg) from the head-mounted Kinect camera."""
+        if self.head_camera is None or self._head_camera_link_name is None:
+            raise RuntimeError("Head camera link not present in the loaded URDF")
+        link_index = self.link_name_to_id[self._head_camera_link_name]
+        return self.head_camera.get_cam_img(self.robot_id, link_index)
 
     def _get_arm(self, arm: str | None):
         arm = self.active_arm if arm is None else arm
