@@ -104,11 +104,15 @@ class GrasppingScenarios():
                 print(obj_name)
 
                 env.reset_robot()          
-                env.remove_all_obj()                        
                
                 path, mod_orn, mod_stiffness = objects.get_obj_info(obj_name)
                 env.load_isolated_obj(path, mod_orn, mod_stiffness)
                 self.dummy_simulation_steps(20)
+
+                try:
+                    env._refresh_rendering()
+                except Exception:
+                    pass
 
                 number_of_attempts = self.ATTEMPTS
                 number_of_failures = 0

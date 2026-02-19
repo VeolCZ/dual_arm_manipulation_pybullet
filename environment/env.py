@@ -110,6 +110,11 @@ class Environment:
         self.obj_positions = []
         self.obj_orientations = []
 
+        # Cache of previously loaded isolated objects to avoid repeated remove/load cycles.
+        # Key: (urdf_path, mod_orn, mod_stiffness) -> bodyUniqueId
+        self._isolated_obj_cache: dict[tuple[str, bool, bool], int] = {}
+        self._hidden_object_pose = ([10.0, 10.0, -10.0], p.getQuaternionFromEuler([0.0, 0.0, 0.0]))
+
         if gripper_type not in ('85', '140'):
             raise NotImplementedError(
                 'Gripper %s not implemented.' % gripper_type)
@@ -622,20 +627,145 @@ class Environment:
             gripper_length = 1.231 - 1.1
         return gripper_length
 
+    def _refresh_rendering(self):
+        """Force a small renderer refresh (mainly for GUI/OpenGL)."""
+        try:
+            p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 0)
+            p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1)
+        except Exception:
+            pass
+
+    def _set_rendering_enabled(self, enabled: bool):
+        """Enable/disable rendering in GUI to avoid OpenGL glitches during load/remove."""
+        # Only meaningful in GUI; harmless in DIRECT.
+        try:
+            p.configureDebugVisualizer(p.COV_ENABLE_RENDERING, 1 if enabled else 0)
+        except Exception:
+            pass
+
+    def _set_body_collision_enabled(self, body_id: int, enabled: bool):
+        try:
+            num_joints = p.getNumJoints(body_id)
+        except Exception:
+            return
+        group = 1 if enabled else 0
+        mask = 1 if enabled else 0
+        for link_idx in range(-1, num_joints):
+            try:
+                p.setCollisionFilterGroupMask(body_id, link_idx, group, mask)
+            except Exception:
+                pass
+
+    def _hide_body(self, body_id: int):
+        self._set_body_collision_enabled(body_id, False)
+        try:
+            p.resetBasePositionAndOrientation(body_id, *self._hidden_object_pose)
+            p.resetBaseVelocity(body_id, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+        except Exception:
+            pass
+
+    def _show_body(self, body_id: int):
+        self._set_body_collision_enabled(body_id, True)
+
+    def _ensure_body_opaque(self, body_id: int):
+        try:
+            vs = p.getVisualShapeData(body_id)
+        except Exception:
+            vs = None
+
+        if not vs:
+            # Fallback
+            try:
+                p.changeVisualShape(body_id, -1, rgbaColor=[1, 1, 1, 1])
+            except Exception:
+                pass
+            return
+
+        for item in vs:
+            # item fields: (bodyUniqueId, linkIndex, visualGeometryType, dimensions, filename,
+            #                localVisualFramePosition, localVisualFrameOrientation, rgbaColor, ...)
+            link_index = int(item[1])
+            rgba = item[7]
+            try:
+                r, g, b, _a = [float(v) for v in rgba]
+                p.changeVisualShape(body_id, link_index, rgbaColor=[r, g, b, 1.0])
+            except Exception:
+                pass
+
+    def _body_exists(self, body_id: int) -> bool:
+        try:
+            p.getBasePositionAndOrientation(body_id)
+            return True
+        except Exception:
+            return False
+
+    def _apply_object_dynamics(self, obj_id: int, mod_stiffness: bool):
+        try:
+            if mod_stiffness:
+                p.changeDynamics(
+                    obj_id,
+                    -1,
+                    lateralFriction=1,
+                    rollingFriction=0.001,
+                    spinningFriction=0.002,
+                    restitution=0.01,
+                    contactStiffness=100000,
+                    contactDamping=0.0,
+                )
+            else:
+                p.changeDynamics(
+                    obj_id,
+                    -1,
+                    lateralFriction=1,
+                    rollingFriction=0.002,
+                    spinningFriction=0.001,
+                    restitution=0.01,
+                )
+        except Exception:
+            pass
+
+    def _load_obj_body(self, path, pos, yaw, mod_orn=False, mod_stiffness=False):
+        # NOTE: This method does not register the object in self.obj_ids/positions/orientations.
+        pos = list(pos)
+        orn = p.getQuaternionFromEuler([0, 0, yaw])
+        self._set_rendering_enabled(False)
+        obj_id = p.loadURDF(path, pos, orn, flags=p.URDF_ENABLE_CACHED_GRAPHICS_SHAPES)
+        # adjust position according to height
+        aabb = p.getAABB(obj_id, -1)
+        if mod_orn:
+            minm, maxm = aabb[0][1], aabb[1][1]
+            orn = p.getQuaternionFromEuler([0, np.pi * 0.5, yaw])
+        else:
+            minm, maxm = aabb[0][2], aabb[1][2]
+
+        pos[2] += (maxm - minm) / 2
+        p.resetBasePositionAndOrientation(obj_id, pos, orn)
+        self._ensure_body_opaque(obj_id)
+        self._apply_object_dynamics(obj_id, bool(mod_stiffness))
+        self._set_rendering_enabled(True)
+        self._refresh_rendering()
+        return obj_id, pos, orn
+
     def remove_obj(self, obj_id):
         # Get index of obj in id list, then remove object from simulation
+        self._set_rendering_enabled(False)
         idx = self.obj_ids.index(obj_id)
         self.obj_orientations.pop(idx)
         self.obj_positions.pop(idx)
         self.obj_ids.pop(idx)
         p.removeBody(obj_id)
+        self._set_rendering_enabled(True)
+        self._refresh_rendering()
 
     def remove_all_obj(self):
+        self._set_rendering_enabled(False)
         self.obj_positions.clear()
         self.obj_orientations.clear()
         for obj_id in self.obj_ids:
             p.removeBody(obj_id)
         self.obj_ids.clear()
+        self._set_rendering_enabled(True)
+        self._refresh_rendering()
 
     def reset_all_obj(self):
         for i, obj_id in enumerate(self.obj_ids):
@@ -650,52 +780,65 @@ class Environment:
             self.obj_orientations[i] = orn
 
     def load_obj(self, path, pos, yaw, mod_orn=False, mod_stiffness=False):
-        orn = p.getQuaternionFromEuler([0, 0, yaw])
-        obj_id = p.loadURDF(path, pos, orn)
-        # adjust position according to height
-        aabb = p.getAABB(obj_id, -1)
-        if mod_orn:
-            minm, maxm = aabb[0][1], aabb[1][1]
-            orn = p.getQuaternionFromEuler([0, np.pi*0.5, yaw])
-        else:
-            minm, maxm = aabb[0][2], aabb[1][2]
-
-        pos[2] += (maxm - minm) / 2
-        p.resetBasePositionAndOrientation(obj_id, pos, orn)
-        # change dynamics
-        if mod_stiffness:
-            p.changeDynamics(obj_id,
-                             -1, lateralFriction=1,
-                             rollingFriction=0.001,
-                             spinningFriction=0.002,
-                             restitution=0.01,
-                             contactStiffness=100000,
-                             contactDamping=0.0)
-        else:
-            p.changeDynamics(obj_id,
-                             -1, lateralFriction=1,
-                             rollingFriction=0.002,
-                             spinningFriction=0.001,
-                             restitution=0.01)
+        obj_id, pos_out, orn_out = self._load_obj_body(path, pos, yaw, mod_orn, mod_stiffness)
         self.obj_ids.append(obj_id)
-        self.obj_positions.append(pos)
-        self.obj_orientations.append(orn)
-        return obj_id, pos, orn
+        self.obj_positions.append(pos_out)
+        self.obj_orientations.append(orn_out)
+        return obj_id, pos_out, orn_out
 
-    def load_isolated_obj(self, path, mod_orn=False, mod_stiffness=False):
-        r_x = random.uniform(
-            self.obj_init_pos[0] - 0.1, self.obj_init_pos[0] + 0.1)
-        r_y = random.uniform(
-            self.obj_init_pos[1] - 0.1, self.obj_init_pos[1] + 0.1)
+    def cycle_isolated_obj(self, path, mod_orn=False, mod_stiffness=False):
+        """Spawn an isolated object using a cache (avoids removeBody/loadURDF loops).
+
+        This is a GUI-stability workaround: repeatedly removing/loading URDFs with complex
+        visuals can cause the main viewport to stop drawing solid geometry.
+        """
+        # Hide currently active objects.
+        for obj_id in list(self.obj_ids):
+            self._hide_body(obj_id)
+
+        self.obj_ids.clear()
+        self.obj_positions.clear()
+        self.obj_orientations.clear()
+
+        r_x = random.uniform(self.obj_init_pos[0] - 0.1, self.obj_init_pos[0] + 0.1)
+        r_y = random.uniform(self.obj_init_pos[1] - 0.1, self.obj_init_pos[1] + 0.1)
         yaw = random.uniform(0, np.pi)
-
         pos = [r_x, r_y, self.Z_TABLE_TOP]
-        obj_id, _, _ = self.load_obj(path, pos, yaw, mod_orn, mod_stiffness)
+
+        key = (str(path), bool(mod_orn), bool(mod_stiffness))
+        obj_id = self._isolated_obj_cache.get(key)
+
+        if obj_id is None or not self._body_exists(obj_id):
+            obj_id, pos_out, orn_out = self._load_obj_body(path, pos, yaw, mod_orn, mod_stiffness)
+            self._isolated_obj_cache[key] = obj_id
+        else:
+            # Reuse cached body.
+            self._show_body(obj_id)
+            orn_out = p.getQuaternionFromEuler([0, np.pi * 0.5, yaw]) if mod_orn else p.getQuaternionFromEuler([0, 0, yaw])
+            p.resetBasePositionAndOrientation(obj_id, pos, orn_out)
+            # Recompute height offset for current orientation.
+            aabb = p.getAABB(obj_id, -1)
+            minm, maxm = (aabb[0][1], aabb[1][1]) if mod_orn else (aabb[0][2], aabb[1][2])
+            pos_out = list(pos)
+            pos_out[2] += (maxm - minm) / 2
+            p.resetBasePositionAndOrientation(obj_id, pos_out, orn_out)
+            p.resetBaseVelocity(obj_id, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+            self._ensure_body_opaque(obj_id)
+            self._apply_object_dynamics(obj_id, bool(mod_stiffness))
+            self._refresh_rendering()
+
+        self.obj_ids.append(obj_id)
+        self.obj_positions.append(pos_out)
+        self.obj_orientations.append(orn_out)
+
         for _ in range(100):
             self.step_simulation()
-            
         self.wait_until_still(obj_id)
         self.update_obj_states()
+
+    def load_isolated_obj(self, path, mod_orn=False, mod_stiffness=False):
+        # Backwards compatible name; prefer cycle_isolated_obj() for GUI stability.
+        return self.cycle_isolated_obj(path, mod_orn=mod_orn, mod_stiffness=mod_stiffness)
 
     def create_temp_box(self, width, num):
         box_width = width
