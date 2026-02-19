@@ -365,6 +365,7 @@ class LinkCamera:
         parent_to_camera_rpy=(0.0, 0.0, 0.0),
         forward_axis=(1.0, 0.0, 0.0),
         up_axis=(0.0, 0.0, 1.0),
+        eye_offset: float = 0.10,
     ):
         self.width, self.height = size
         self.near, self.far = float(near), float(far)
@@ -379,6 +380,7 @@ class LinkCamera:
 
         self.forward_axis = tuple(float(v) for v in forward_axis)
         self.up_axis = tuple(float(v) for v in up_axis)
+        self.eye_offset = float(eye_offset)
 
     @staticmethod
     def _rotate_vec(quat_xyzw, v):
@@ -390,14 +392,27 @@ class LinkCamera:
         z = m[6] * float(v[0]) + m[7] * float(v[1]) + m[8] * float(v[2])
         return (x, y, z)
 
-    def get_cam_img(self, robot_id: int, link_index: int):
+    def get_cam_img(self, robot_id: int, link_index: int, target_world=None):
         """Render RGB, depth, seg from a link.
 
         Args:
             robot_id: pybullet bodyUniqueId
             link_index: pybullet link index (joint index for the child link)
+            target_world: Optional (x,y,z) in world frame. If provided, the camera
+                will look at this point. Otherwise it will look along its
+                configured forward axis.
         """
-        link_pos, link_orn = p.getLinkState(robot_id, link_index, computeForwardKinematics=True)[0:2]
+        # IMPORTANT: Use the link *frame* pose, not the COM pose.
+        # PyBullet's getLinkState returns:
+        #   [0:2] = COM position/orientation
+        #   [4:6] = link frame position/orientation (URDF link frame)
+        # Using COM here often causes a visible offset between the rendered camera
+        # pose and the expected URDF frame pose.
+        ls = p.getLinkState(robot_id, link_index, computeForwardKinematics=True)
+        if len(ls) >= 6:
+            link_pos, link_orn = ls[4], ls[5]
+        else:
+            link_pos, link_orn = ls[0], ls[1]
 
         cam_pos, cam_orn = p.multiplyTransforms(
             link_pos,
@@ -406,10 +421,28 @@ class LinkCamera:
             self.parent_to_camera_quat,
         )
 
-        forward_world = self._rotate_vec(cam_orn, self.forward_axis)
         up_world = self._rotate_vec(cam_orn, self.up_axis)
 
-        target = [cam_pos[0] + forward_world[0], cam_pos[1] + forward_world[1], cam_pos[2] + forward_world[2]]
+        # Optional eye offset to push the camera out of its own housing/geometry.
+        # This is especially useful for wrist-mounted cameras where the link frame
+        # is at the center of the CAD mesh.
+        forward_world_for_offset = self._rotate_vec(cam_orn, self.forward_axis)
+        if self.eye_offset != 0.0:
+            cam_pos = (
+                cam_pos[0] + self.eye_offset * forward_world_for_offset[0],
+                cam_pos[1] + self.eye_offset * forward_world_for_offset[1],
+                cam_pos[2] + self.eye_offset * forward_world_for_offset[2],
+            )
+
+        if target_world is None:
+            forward_world = forward_world_for_offset
+            target = [
+                cam_pos[0] + forward_world[0],
+                cam_pos[1] + forward_world[1],
+                cam_pos[2] + forward_world[2],
+            ]
+        else:
+            target = [float(target_world[0]), float(target_world[1]), float(target_world[2])]
         view_matrix = p.computeViewMatrix(cam_pos, target, up_world)
 
         _w, _h, rgb, depth, seg = p.getCameraImage(self.width, self.height, view_matrix, self.projection_matrix)

@@ -1,7 +1,6 @@
 import warnings
 from datetime import datetime
 
-import matplotlib.pyplot as plt
 import numpy as np
 
 from network.utils.dataset_processing.grasp import detect_grasps
@@ -29,6 +28,11 @@ def plot_results(
     :param grasp_width_img: (optional) Width output of network
     :return:
     """
+    # Clear any previous axes/colorbars on the figure.
+    try:
+        fig.clf()
+    except Exception:
+        pass
     gs = detect_grasps(grasp_q_img, grasp_angle_img, width_img=grasp_width_img, no_grasps=no_grasps)
 
     #plt.ion()
@@ -61,19 +65,28 @@ def plot_results(
     plot = ax.imshow(grasp_q_img, cmap='jet', vmin=0, vmax=1)
     ax.set_title('Quality')
     ax.axis('off')
-    plt.colorbar(plot)
+    try:
+        fig.colorbar(plot, ax=ax, fraction=0.046, pad=0.04)
+    except Exception:
+        pass
 
     ax = fig.add_subplot(2, 3, 5)
     plot = ax.imshow(grasp_angle_img, cmap='hsv', vmin=-np.pi / 2, vmax=np.pi / 2)
     ax.set_title('Angle')
     ax.axis('off')
-    plt.colorbar(plot)
+    try:
+        fig.colorbar(plot, ax=ax, fraction=0.046, pad=0.04)
+    except Exception:
+        pass
 
     ax = fig.add_subplot(2, 3, 6)
     plot = ax.imshow(grasp_width_img, cmap='jet', vmin=0, vmax=100)
     ax.set_title('Width')
     ax.axis('off')
-    plt.colorbar(plot)
+    try:
+        fig.colorbar(plot, ax=ax, fraction=0.046, pad=0.04)
+    except Exception:
+        pass
 
     # plt.pause(0.1)
     # fig.canvas.draw()

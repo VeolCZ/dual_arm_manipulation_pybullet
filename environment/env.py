@@ -6,7 +6,10 @@ import pybullet as p
 import pybullet_data
 import random
 import os
-
+from typing import Iterable
+import time
+import matplotlib
+import matplotlib.pyplot as plt
 
 class FailToReachTargetError(RuntimeError):
     pass
@@ -39,7 +42,9 @@ class Environment:
 
     # Optional per-arm yaw offsets (radians) for matching tool frame conventions.
     GRASP_YAW_OFFSET_LEFT = 0.0
-    GRASP_YAW_OFFSET_RIGHT = 0.0
+    # The right tool0 frame is effectively rotated 180deg around Z vs the grasp yaw convention,
+    # so compensate here.
+    GRASP_YAW_OFFSET_RIGHT = -np.pi
 
     @staticmethod
     def _quat_from_rotm(R: np.ndarray):
@@ -104,6 +109,23 @@ class Environment:
         self.vis = vis
         self.debug = debug
         self.camera = camera
+
+        # Optional: auto-update camera mosaic viewer on each simulation step.
+        # Disabled by default to avoid adding GUI overhead to training runs.
+        self.auto_stream_cameras = False
+        self.auto_stream_cameras_which = ("external", "head", "left", "right")
+        self.auto_stream_cameras_show_depth = False
+        self.auto_stream_cameras_max_fps = 10.0
+        self.auto_stream_cameras_pause_s = 0.001
+        self.auto_stream_cameras_use_blit = True
+
+        # Debug drawing (axes + rays) for wrist cameras.
+        # This is fairly expensive; default to enabled only when debug=True.
+        self.draw_camera_frame_debug = bool(debug)
+
+        # Cache the external camera look-at target so link-mounted cameras can
+        # be configured to match it.
+        self._external_cam_target = (float(camera.x_t), float(camera.y_t), float(camera.z_t))
 
         self.obj_init_pos = (camera.x, camera.y)
         self.obj_ids = []
@@ -175,6 +197,15 @@ class Environment:
                                     p.getQuaternionFromEuler([0, 0, 0]),
                                     useFixedBase=True)
 
+        # Debug visualization: camera link reference frames (axis gizmos).
+        # Stored as: key -> {'x': id, 'y': id, 'z': id}
+        self._camera_frame_debug_ids: dict[str, dict[str, int]] = {}
+        # Debug visualization: rendered camera frame (thicker) + target point.
+        self._camera_render_frame_debug_ids: dict[str, dict[str, int]] = {}
+        self._camera_target_debug_ids: dict[str, dict[str, int]] = {}
+        self.camera_frame_axis_len = 0.08  # meters
+        self.camera_render_frame_axis_len = 0.12  # meters
+
         # -----------------------------
         # Load dual-arm robot
         # -----------------------------
@@ -211,15 +242,39 @@ class Environment:
         ) = setup_dual_arm_sisbot(p, self.robot_id, gripper_type)
 
         # -----------------------------
-        # Head-mounted camera (Kinect)
+        # Link-mounted cameras
         # -----------------------------
-        # Prefer an optical frame if present (ROS convention: Z forward, Y down).
-        if "head_mount_kinect_rgb_optical_frame" in self.link_name_to_id:
+        # Head-mounted Kinect RGB frame (requested).
+        if "head_mount_kinect_rgb_frame" in self.link_name_to_id:
+            self._head_camera_link_name = "head_mount_kinect_rgb_frame"
+        elif "head_mount_kinect_rgb_optical_frame" in self.link_name_to_id:
             self._head_camera_link_name = "head_mount_kinect_rgb_optical_frame"
         elif "head_mount_kinect_link" in self.link_name_to_id:
             self._head_camera_link_name = "head_mount_kinect_link"
         else:
             self._head_camera_link_name = None
+
+        # Wrist cameras.
+        # Prefer the physical camera link if present; its axes are usually aligned with
+        # typical camera conventions (see user example), and avoids surprises from the
+        # intermediate *_rgb_frame / *_rgb_optical_frame transforms.
+        if "left_arm_camera_link" in self.link_name_to_id:
+            self._left_arm_camera_link_name = "left_arm_camera_link"
+        elif "left_arm_camera_rgb_optical_frame" in self.link_name_to_id:
+            self._left_arm_camera_link_name = "left_arm_camera_rgb_optical_frame"
+        elif "left_arm_camera_rgb_frame" in self.link_name_to_id:
+            self._left_arm_camera_link_name = "left_arm_camera_rgb_frame"
+        else:
+            self._left_arm_camera_link_name = None
+
+        if "right_arm_camera_link" in self.link_name_to_id:
+            self._right_arm_camera_link_name = "right_arm_camera_link"
+        elif "right_arm_camera_rgb_optical_frame" in self.link_name_to_id:
+            self._right_arm_camera_link_name = "right_arm_camera_rgb_optical_frame"
+        elif "right_arm_camera_rgb_frame" in self.link_name_to_id:
+            self._right_arm_camera_link_name = "right_arm_camera_rgb_frame"
+        else:
+            self._right_arm_camera_link_name = None
 
         self.head_camera = None
         if self._head_camera_link_name is not None:
@@ -236,6 +291,65 @@ class Environment:
                 if self._head_camera_link_name.endswith("_optical_frame")
                 else (0.0, 0.0, 1.0),
             )
+
+        self.left_arm_camera = None
+        if self._left_arm_camera_link_name is not None:
+            if self._left_arm_camera_link_name.endswith("_rgb_optical_frame"):
+                l_fwd, l_up = (0.0, 0.0, 1.0), (0.0, -1.0, 0.0)
+            elif self._left_arm_camera_link_name.endswith("_camera_link"):
+                # Match common camera_link convention (and the provided example):
+                # forward = -Z, up = +X.
+                l_fwd, l_up = (0.0, 0.0, -1.0), (-1.0, 0.0, 0.0)
+            else:
+                l_fwd, l_up = (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)
+
+            self.left_arm_camera = LinkCamera(
+                near=0.02,
+                far=float(camera.far),
+                size=(int(camera.width), int(camera.height)),
+                fov=float(camera.fov),
+                forward_axis=l_fwd,
+                up_axis=l_up,
+                eye_offset=0.05,
+            )
+
+        self.right_arm_camera = None
+        if self._right_arm_camera_link_name is not None:
+            if self._right_arm_camera_link_name.endswith("_rgb_optical_frame"):
+                r_fwd, r_up = (0.0, 0.0, 1.0), (0.0, -1.0, 0.0)
+            elif self._right_arm_camera_link_name.endswith("_camera_link"):
+                r_fwd, r_up = (0.0, 0.0, -1.0), (-1.0, 0.0, 0.0)
+            else:
+                r_fwd, r_up = (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)
+
+            self.right_arm_camera = LinkCamera(
+                near=0.02,
+                far=float(camera.far),
+                size=(int(camera.width), int(camera.height)),
+                fov=float(camera.fov),
+                forward_axis=r_fwd,
+                up_axis=r_up,
+                eye_offset=0.05,
+            )
+
+            # Wrist camera aiming parameters (used by get_left/right_arm_cam_img).
+            # These are in meters in world space.
+            self.wrist_cam_look_ahead = 0.20
+            # Tilt-down angle (degrees). Positive = tilt down.
+            # Internally converted to a camera-local Y offset using:
+            #   y = -tan(deg) * z
+            self.wrist_cam_tilt_down = 90.0
+
+            # Optional per-axis aiming offsets in the camera's local frame (meters).
+            # Camera local axes (for these parameters):
+            # - X: right
+            # - Y: up
+            # - Z: forward
+            # If left as None, we fall back to (look_ahead, tilt_down):
+            #   X = 0, Y = -tilt_down, Z = look_ahead
+            self.wrist_cam_look_ahead_x = None
+            self.wrist_cam_look_ahead_y = None
+            self.wrist_cam_look_ahead_z = None
 
         if "left_tool0" not in self.link_name_to_id or "right_tool0" not in self.link_name_to_id:
             raise RuntimeError("Could not find left_tool0/right_tool0 in loaded URDF.")
@@ -306,7 +420,7 @@ class Environment:
             z_cam_l1 = camera.z #m 
 
             color = [0.3, 0, 0]
-            p.addUserDebugText("RGB-D camera", [camera.x-0.1, camera.y, camera.z+0.02], color, textSize=2)
+            p.addUserDebugText("External RGB-D camera", [camera.x-0.1, camera.y, camera.z+0.02], color, textSize=2)
              
             p.addUserDebugLine([camera.x+alpha, camera.y+alpha, z_cam_l1], [camera.x+alpha, camera.y-alpha, z_cam_l1], color, lineWidth=4)
             p.addUserDebugLine([camera.x+alpha, camera.y-alpha, z_cam_l1], [camera.x-alpha, camera.y-alpha, z_cam_l1], color, lineWidth=4)
@@ -342,7 +456,7 @@ class Environment:
 
             ### working area             
             working_area = 0.79 #m 
-            beta = 0.4 
+            beta = 0.415 
             p.addUserDebugLine([camera.x+beta, camera.y+beta, working_area], [camera.x+beta, camera.y-beta, working_area], [0, 1, 0], lineWidth=5)
             p.addUserDebugLine([camera.x+beta, camera.y-beta, working_area], [camera.x-beta, camera.y-beta, working_area], [0, 1, 0], lineWidth=5)
             p.addUserDebugLine([camera.x-beta, camera.y-beta, working_area], [camera.x-beta, camera.y+beta, working_area], [0, 1, 0], lineWidth=5)
@@ -362,7 +476,621 @@ class Environment:
         if self.head_camera is None or self._head_camera_link_name is None:
             raise RuntimeError("Head camera link not present in the loaded URDF")
         link_index = self.link_name_to_id[self._head_camera_link_name]
-        return self.head_camera.get_cam_img(self.robot_id, link_index)
+        # Match the external camera's look-at target.
+        return self.head_camera.get_cam_img(self.robot_id, link_index, target_world=self._external_cam_target)
+
+    def get_left_arm_cam_img(self):
+        """Return (rgb, depth, seg) from the left wrist RGB camera."""
+        if self.left_arm_camera is None or self._left_arm_camera_link_name is None:
+            raise RuntimeError("Left arm camera link not present in the loaded URDF")
+        link_index = self.link_name_to_id[self._left_arm_camera_link_name]
+        ls = p.getLinkState(self.robot_id, link_index, computeForwardKinematics=True)
+        cam_link_pos, cam_link_orn = (ls[4], ls[5]) if len(ls) >= 6 else (ls[0], ls[1])
+        tool_ls = p.getLinkState(self.robot_id, self.left_eef_id, computeForwardKinematics=True)
+        tool_pos = tool_ls[4] if len(tool_ls) >= 6 else tool_ls[0]
+
+        # Apply parent->camera transform (same as LinkCamera) so target is computed
+        # from the same pose used for rendering.
+        cam_pos, cam_orn = p.multiplyTransforms(
+            cam_link_pos,
+            cam_link_orn,
+            self.left_arm_camera.parent_to_camera_xyz,
+            self.left_arm_camera.parent_to_camera_quat,
+        )
+        # Target: look ahead and slightly down to see the workspace.
+        m = p.getMatrixFromQuaternion(cam_orn)
+        fx, fy, fz = self.left_arm_camera.forward_axis
+        fwd_world_for_offset = (
+            float(m[0]) * float(fx) + float(m[1]) * float(fy) + float(m[2]) * float(fz),
+            float(m[3]) * float(fx) + float(m[4]) * float(fy) + float(m[5]) * float(fz),
+            float(m[6]) * float(fx) + float(m[7]) * float(fy) + float(m[8]) * float(fz),
+        )
+        fwd_world = fwd_world_for_offset
+        ux, uy, uz = self.left_arm_camera.up_axis
+        up_world = (
+            float(m[0]) * float(ux) + float(m[1]) * float(uy) + float(m[2]) * float(uz),
+            float(m[3]) * float(ux) + float(m[4]) * float(uy) + float(m[5]) * float(uz),
+            float(m[6]) * float(ux) + float(m[7]) * float(uy) + float(m[8]) * float(uz),
+        )
+
+        # If the camera is pointing back toward tool0, flip its forward axis.
+        # This avoids the common failure mode where the wrist camera mostly sees the gripper base.
+        to_tool = (
+            float(tool_pos[0]) - float(cam_pos[0]),
+            float(tool_pos[1]) - float(cam_pos[1]),
+            float(tool_pos[2]) - float(cam_pos[2]),
+        )
+        if (fwd_world[0] * to_tool[0] + fwd_world[1] * to_tool[1] + fwd_world[2] * to_tool[2]) > 0.0:
+            fx, fy, fz = (-float(fx), -float(fy), -float(fz))
+            fwd_world = (
+                float(m[0]) * float(fx) + float(m[1]) * float(fy) + float(m[2]) * float(fz),
+                float(m[3]) * float(fx) + float(m[4]) * float(fy) + float(m[5]) * float(fz),
+                float(m[6]) * float(fx) + float(m[7]) * float(fy) + float(m[8]) * float(fz),
+            )
+
+        # Use the exact same eye offset convention as LinkCamera:
+        # eye_offset is always applied along the camera's configured forward axis.
+        cam_eye = (
+            float(cam_pos[0]) + float(self.left_arm_camera.eye_offset) * fwd_world_for_offset[0],
+            float(cam_pos[1]) + float(self.left_arm_camera.eye_offset) * fwd_world_for_offset[1],
+            float(cam_pos[2]) + float(self.left_arm_camera.eye_offset) * fwd_world_for_offset[2],
+        )
+
+        # Build a camera-local right/up basis for per-axis offsets.
+        right_world = np.cross(np.array(fwd_world, dtype=float), np.array(up_world, dtype=float))
+        rn = float(np.linalg.norm(right_world) + 1e-12)
+        right_world = (right_world / rn).tolist()
+        up_ortho_world = np.cross(np.array(right_world, dtype=float), np.array(fwd_world, dtype=float))
+        un = float(np.linalg.norm(up_ortho_world) + 1e-12)
+        up_ortho_world = (up_ortho_world / un).tolist()
+
+        ox = 0.0 if self.wrist_cam_look_ahead_x is None else float(self.wrist_cam_look_ahead_x)
+        oz = float(self.wrist_cam_look_ahead) if self.wrist_cam_look_ahead_z is None else float(self.wrist_cam_look_ahead_z)
+        if self.wrist_cam_look_ahead_y is None:
+            tilt_deg = float(self.wrist_cam_tilt_down)
+            oy = -math.tan(math.radians(tilt_deg)) * oz
+        else:
+            oy = float(self.wrist_cam_look_ahead_y)
+
+        target = (
+            float(cam_eye[0]) + oz * float(fwd_world[0]) + oy * float(up_ortho_world[0]) + ox * float(right_world[0]),
+            float(cam_eye[1]) + oz * float(fwd_world[1]) + oy * float(up_ortho_world[1]) + ox * float(right_world[1]),
+            float(cam_eye[2]) + oz * float(fwd_world[2]) + oy * float(up_ortho_world[2]) + ox * float(right_world[2]),
+        )
+
+        # Prefer looking through the fingertip if we can estimate it.
+        fingertip = self._get_fingertip_marker("left", tool_pos)
+        if fingertip is not None:
+            dv = np.array(
+                [
+                    float(fingertip[0]) - float(cam_eye[0]),
+                    float(fingertip[1]) - float(cam_eye[1]),
+                    float(fingertip[2]) - float(cam_eye[2]),
+                ],
+                dtype=float,
+            )
+            if float(np.linalg.norm(dv)) > 1e-6:
+                target = fingertip
+        return self.left_arm_camera.get_cam_img(self.robot_id, link_index, target_world=target)
+
+    def get_right_arm_cam_img(self):
+        """Return (rgb, depth, seg) from the right wrist RGB camera."""
+        if self.right_arm_camera is None or self._right_arm_camera_link_name is None:
+            raise RuntimeError("Right arm camera link not present in the loaded URDF")
+        link_index = self.link_name_to_id[self._right_arm_camera_link_name]
+        ls = p.getLinkState(self.robot_id, link_index, computeForwardKinematics=True)
+        cam_link_pos, cam_link_orn = (ls[4], ls[5]) if len(ls) >= 6 else (ls[0], ls[1])
+        tool_ls = p.getLinkState(self.robot_id, self.right_eef_id, computeForwardKinematics=True)
+        tool_pos = tool_ls[4] if len(tool_ls) >= 6 else tool_ls[0]
+
+        cam_pos, cam_orn = p.multiplyTransforms(
+            cam_link_pos,
+            cam_link_orn,
+            self.right_arm_camera.parent_to_camera_xyz,
+            self.right_arm_camera.parent_to_camera_quat,
+        )
+        m = p.getMatrixFromQuaternion(cam_orn)
+        fx, fy, fz = self.right_arm_camera.forward_axis
+        fwd_world_for_offset = (
+            float(m[0]) * float(fx) + float(m[1]) * float(fy) + float(m[2]) * float(fz),
+            float(m[3]) * float(fx) + float(m[4]) * float(fy) + float(m[5]) * float(fz),
+            float(m[6]) * float(fx) + float(m[7]) * float(fy) + float(m[8]) * float(fz),
+        )
+        fwd_world = fwd_world_for_offset
+        ux, uy, uz = self.right_arm_camera.up_axis
+        up_world = (
+            float(m[0]) * float(ux) + float(m[1]) * float(uy) + float(m[2]) * float(uz),
+            float(m[3]) * float(ux) + float(m[4]) * float(uy) + float(m[5]) * float(uz),
+            float(m[6]) * float(ux) + float(m[7]) * float(uy) + float(m[8]) * float(uz),
+        )
+
+        to_tool = (
+            float(tool_pos[0]) - float(cam_pos[0]),
+            float(tool_pos[1]) - float(cam_pos[1]),
+            float(tool_pos[2]) - float(cam_pos[2]),
+        )
+        if (fwd_world[0] * to_tool[0] + fwd_world[1] * to_tool[1] + fwd_world[2] * to_tool[2]) > 0.0:
+            fx, fy, fz = (-float(fx), -float(fy), -float(fz))
+            fwd_world = (
+                float(m[0]) * float(fx) + float(m[1]) * float(fy) + float(m[2]) * float(fz),
+                float(m[3]) * float(fx) + float(m[4]) * float(fy) + float(m[5]) * float(fz),
+                float(m[6]) * float(fx) + float(m[7]) * float(fy) + float(m[8]) * float(fz),
+            )
+        cam_eye = (
+            float(cam_pos[0]) + float(self.right_arm_camera.eye_offset) * fwd_world_for_offset[0],
+            float(cam_pos[1]) + float(self.right_arm_camera.eye_offset) * fwd_world_for_offset[1],
+            float(cam_pos[2]) + float(self.right_arm_camera.eye_offset) * fwd_world_for_offset[2],
+        )
+
+        right_world = np.cross(np.array(fwd_world, dtype=float), np.array(up_world, dtype=float))
+        rn = float(np.linalg.norm(right_world) + 1e-12)
+        right_world = (right_world / rn).tolist()
+        up_ortho_world = np.cross(np.array(right_world, dtype=float), np.array(fwd_world, dtype=float))
+        un = float(np.linalg.norm(up_ortho_world) + 1e-12)
+        up_ortho_world = (up_ortho_world / un).tolist()
+
+        ox = 0.0 if self.wrist_cam_look_ahead_x is None else float(self.wrist_cam_look_ahead_x)
+        oz = float(self.wrist_cam_look_ahead) if self.wrist_cam_look_ahead_z is None else float(self.wrist_cam_look_ahead_z)
+        if self.wrist_cam_look_ahead_y is None:
+            tilt_deg = float(self.wrist_cam_tilt_down)
+            oy = -math.tan(math.radians(tilt_deg)) * oz
+        else:
+            oy = float(self.wrist_cam_look_ahead_y)
+
+        target = (
+            float(cam_eye[0]) + oz * float(fwd_world[0]) + oy * float(up_ortho_world[0]) + ox * float(right_world[0]),
+            float(cam_eye[1]) + oz * float(fwd_world[1]) + oy * float(up_ortho_world[1]) + ox * float(right_world[1]),
+            float(cam_eye[2]) + oz * float(fwd_world[2]) + oy * float(up_ortho_world[2]) + ox * float(right_world[2]),
+        )
+
+        fingertip = self._get_fingertip_marker("right", tool_pos)
+        if fingertip is not None:
+            dv = np.array(
+                [
+                    float(fingertip[0]) - float(cam_eye[0]),
+                    float(fingertip[1]) - float(cam_eye[1]),
+                    float(fingertip[2]) - float(cam_eye[2]),
+                ],
+                dtype=float,
+            )
+            if float(np.linalg.norm(dv)) > 1e-6:
+                target = fingertip
+        return self.right_arm_camera.get_cam_img(self.robot_id, link_index, target_world=target)
+
+    def visualize_cameras(
+        self,
+        which: Iterable[str] = ("external", "head", "left", "right"),
+        show_depth: bool = False,
+        window_name: str = "cameras",
+        wait_ms: int = 1,
+    ) -> bool:
+        """Visualize camera streams live in an OpenCV window.
+
+        Call this once per control/sim step to stream frames while the robot moves.
+
+        Returns:
+            True to continue, False if user requested quit (q/esc) or visualization is unavailable.
+        """
+        try:
+            import cv2
+        except Exception:
+            # Likely opencv not installed (or headless build missing GUI).
+            return False
+
+        which_set = set(str(s).lower() for s in which)
+
+        def _as_uint8_rgb(img):
+            arr = np.asarray(img)
+            if arr.dtype != np.uint8:
+                arr = np.clip(arr, 0, 255).astype(np.uint8)
+            return arr
+
+        def _rgb_to_bgr(rgb_u8):
+            return cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2BGR)
+
+        def _depth_to_vis(depth):
+            d = np.asarray(depth)
+            d = np.nan_to_num(d, nan=0.0, posinf=0.0, neginf=0.0)
+            d_norm = cv2.normalize(d, None, 0, 255, cv2.NORM_MINMAX)
+            d_u8 = d_norm.astype(np.uint8)
+            return cv2.applyColorMap(d_u8, cv2.COLORMAP_TURBO)
+
+        rgb_frames: dict[str, np.ndarray] = {}
+        depth_frames: dict[str, np.ndarray] = {}
+
+        try:
+            if "external" in which_set:
+                rgb, depth, _seg = self.camera.get_cam_img()
+                rgb_frames["external"] = _as_uint8_rgb(rgb)
+                depth_frames["external"] = np.asarray(depth)
+        except Exception:
+            pass
+
+        try:
+            if "head" in which_set and self.head_camera is not None:
+                rgb, depth, _seg = self.get_head_cam_img()
+                rgb_frames["head"] = _as_uint8_rgb(rgb)
+                depth_frames["head"] = np.asarray(depth)
+        except Exception:
+            pass
+
+        try:
+            if "left" in which_set and self.left_arm_camera is not None:
+                rgb, depth, _seg = self.get_left_arm_cam_img()
+                rgb_frames["left"] = _as_uint8_rgb(rgb)
+                depth_frames["left"] = np.asarray(depth)
+        except Exception:
+            pass
+
+        try:
+            if "right" in which_set and self.right_arm_camera is not None:
+                rgb, depth, _seg = self.get_right_arm_cam_img()
+                rgb_frames["right"] = _as_uint8_rgb(rgb)
+                depth_frames["right"] = np.asarray(depth)
+        except Exception:
+            pass
+
+        if not rgb_frames:
+            return False
+
+        any_frame = next(iter(rgb_frames.values()))
+        h, w = int(any_frame.shape[0]), int(any_frame.shape[1])
+        blank = np.zeros((h, w, 3), dtype=np.uint8)
+
+        def _labeled(name: str):
+            rgb_u8 = rgb_frames.get(name)
+            bgr = blank.copy() if rgb_u8 is None else _rgb_to_bgr(rgb_u8)
+            cv2.putText(
+                bgr,
+                name,
+                (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            return bgr
+
+        mosaic_rgb = np.vstack(
+            [
+                np.hstack([_labeled("external"), _labeled("head")]),
+                np.hstack([_labeled("left"), _labeled("right")]),
+            ]
+        )
+
+        try:
+            cv2.imshow(window_name, mosaic_rgb)
+            if show_depth:
+                def _d(name: str):
+                    return _depth_to_vis(depth_frames.get(name, np.zeros((h, w), dtype=np.float32)))
+
+                mosaic_depth = np.vstack(
+                    [
+                        np.hstack([_d("external"), _d("head")]),
+                        np.hstack([_d("left"), _d("right")]),
+                    ]
+                )
+                cv2.imshow(f"{window_name}_depth", mosaic_depth)
+
+            key = int(cv2.waitKey(int(wait_ms))) & 0xFF
+            if key in (27, ord('q')):
+                return False
+            return True
+        except Exception:
+            return False
+
+    def visualize_cameras_matplotlib(
+        self,
+        which: Iterable[str] = ("external", "head", "left", "right"),
+        show_depth: bool = False,
+        window_title: str = "cameras",
+        pause_s: float = 0.001,
+        max_fps: float | None = None,
+        use_blit: bool = True,
+        visible: bool = False,
+    ) -> bool:
+        """Visualize camera streams live using Matplotlib.
+
+        This avoids OpenCV GUI backends (which can be problematic when
+        `opencv-python-headless` is installed). Call once per sim/control step.
+
+        Returns:
+            True to continue, False if visualization is unavailable.
+        """
+
+        # TODO: Matplotlib can be very slow at rendering, especially with multiple subplots.
+        # This can be because of merging images into a single mosaic (fewer artists) and/or using blitting (only redraw changed artists). 
+        # and also writing caption to the images. 
+        # We can find a way to accelerate this. 
+        if not visible :
+            return 
+        # try:
+        #     import matplotlib
+        #     import matplotlib.pyplot as plt
+        # except Exception:
+        #     return False
+
+        # Optional FPS throttle (useful to reduce GUI overhead).
+        # Only applies once the viewer exists; otherwise we still create the window.
+        viewer_existing = getattr(self, "_mpl_cam_viewer", None)
+        if viewer_existing is not None and max_fps is not None:
+            try:
+                max_fps_f = float(max_fps)
+            except Exception:
+                max_fps_f = 0.0
+            if max_fps_f > 0.0:
+                now = float(time.time())
+                last = float(getattr(self, "_mpl_cam_last_draw_ts", 0.0))
+                min_dt = 1.0 / max_fps_f
+                # If the user closed the window, stop.
+                try:
+                    if not plt.fignum_exists(viewer_existing["fig"].number):
+                        self._mpl_cam_viewer = None
+                        return False
+                except Exception:
+                    pass
+                if (now - last) < min_dt:
+                    # Still let matplotlib process events.
+                    try:
+                        plt.pause(float(pause_s))
+                    except Exception:
+                        pass
+                    return True
+                self._mpl_cam_last_draw_ts = now
+
+        which_set = set(str(s).lower() for s in which)
+
+        def _as_float_or_u8_rgb(img):
+            arr = np.asarray(img)
+            if arr.dtype == np.uint8:
+                return arr
+            # PyBullet sometimes returns uint8 already; otherwise normalize/clamp.
+            return np.clip(arr, 0, 255).astype(np.uint8)
+
+        # Capture frames
+        rgb_frames = {}
+        depth_frames = {}
+
+        if "external" in which_set:
+            rgb, depth, _seg = self.camera.get_cam_img()
+            rgb_frames["external"] = _as_float_or_u8_rgb(rgb)
+            depth_frames["external"] = np.asarray(depth)
+
+        if "head" in which_set and self.head_camera is not None:
+            rgb, depth, _seg = self.get_head_cam_img()
+            rgb_frames["head"] = _as_float_or_u8_rgb(rgb)
+            depth_frames["head"] = np.asarray(depth)
+
+        if "left" in which_set and self.left_arm_camera is not None:
+            rgb, depth, _seg = self.get_left_arm_cam_img()
+            rgb_frames["left"] = _as_float_or_u8_rgb(rgb)
+            depth_frames["left"] = np.asarray(depth)
+
+        if "right" in which_set and self.right_arm_camera is not None:
+            rgb, depth, _seg = self.get_right_arm_cam_img()
+            rgb_frames["right"] = _as_float_or_u8_rgb(rgb)
+            depth_frames["right"] = np.asarray(depth)
+
+        if not getattr(self, "_mpl_cam_keys_printed", False):
+            self._mpl_cam_keys_printed = True
+            print(
+                "[viewer] Camera frames available:",
+                sorted(rgb_frames.keys()),
+                "| left_link=", getattr(self, "_left_arm_camera_link_name", None),
+                "right_link=", getattr(self, "_right_arm_camera_link_name", None),
+            )
+
+        if not rgb_frames:
+            return False
+
+        def _make_mosaic(rgb_frames_local: dict[str, np.ndarray]) -> np.ndarray:
+            any_rgb = next(iter(rgb_frames_local.values()))
+            h, w = int(any_rgb.shape[0]), int(any_rgb.shape[1])
+
+            def _tile(name: str) -> np.ndarray:
+                img = rgb_frames_local.get(name)
+                if img is None:
+                    img = np.zeros((h, w, 3), dtype=np.uint8)
+                else:
+                    img = img.astype(np.uint8, copy=False)
+                return img
+
+            mosaic = np.vstack(
+                [
+                    np.hstack([_tile("external"), _tile("head")]),
+                    np.hstack([_tile("left"), _tile("right")]),
+                ]
+            )
+            return mosaic
+
+        def _make_depth_mosaic(depth_frames_local: dict[str, np.ndarray]) -> np.ndarray:
+            any_depth = next(iter(depth_frames_local.values()))
+            h, w = int(any_depth.shape[0]), int(any_depth.shape[1])
+
+            def _norm(d: np.ndarray) -> np.ndarray:
+                d = np.asarray(d, dtype=np.float32)
+                d = np.nan_to_num(d, nan=0.0, posinf=0.0, neginf=0.0)
+                # normalize per-tile to keep contrast useful
+                mn, mx = float(np.min(d)), float(np.max(d))
+                if mx - mn < 1e-6:
+                    return np.zeros((h, w), dtype=np.float32)
+                return (d - mn) / (mx - mn)
+
+            def _tile(name: str) -> np.ndarray:
+                d = depth_frames_local.get(name)
+                if d is None:
+                    d = np.zeros((h, w), dtype=np.float32)
+                return _norm(d)
+
+            return np.vstack(
+                [
+                    np.hstack([_tile("external"), _tile("head")]),
+                    np.hstack([_tile("left"), _tile("right")]),
+                ]
+            )
+
+        # Lazy-init persistent figure (single mosaic -> less crowded than 2x2 subplots).
+        viewer = getattr(self, "_mpl_cam_viewer", None)
+        if viewer is not None and "im" not in viewer:
+            viewer = None
+            self._mpl_cam_viewer = None
+
+        if viewer is None:
+            plt.ion()
+            fig = plt.figure(num=window_title)
+            fig.clf()
+            try:
+                fig.canvas.manager.set_window_title(window_title)
+            except Exception:
+                pass
+
+            ax = fig.add_axes([0.0, 0.0, 1.0, 1.0])
+            ax.axis('off')
+            mosaic0 = _make_mosaic(rgb_frames)
+            im = ax.imshow(mosaic0)
+
+            # Small static labels (less clutter than subplot titles, and no per-frame overhead).
+            any_rgb = next(iter(rgb_frames.values()))
+            h, w = int(any_rgb.shape[0]), int(any_rgb.shape[1])
+            labels = [
+                ("external", (8, 14)),
+                ("head", (w + 8, 14)),
+                ("left", (8, h + 14)),
+                ("right", (w + 8, h + 14)),
+            ]
+            label_artists = []
+            for text, (x, y) in labels:
+                label_artists.append(ax.text(x, y, text, color='w', fontsize=10, va='top'))
+
+            depth_fig = None
+            depth_ax = None
+            depth_im = None
+            if show_depth:
+                depth_fig = plt.figure(num=f"{window_title}_depth")
+                depth_fig.clf()
+                try:
+                    depth_fig.canvas.manager.set_window_title(f"{window_title}_depth")
+                except Exception:
+                    pass
+                depth_ax = depth_fig.add_axes([0.0, 0.0, 1.0, 1.0])
+                depth_ax.axis('off')
+                depth0 = _make_depth_mosaic(depth_frames)
+                depth_im = depth_ax.imshow(depth0, cmap='turbo', vmin=0.0, vmax=1.0)
+
+            self._mpl_cam_viewer = {
+                "fig": fig,
+                "ax": ax,
+                "im": im,
+                "labels": label_artists,
+                "depth_fig": depth_fig,
+                "depth_ax": depth_ax,
+                "depth_im": depth_im,
+                "use_blit": bool(use_blit),
+                "blit_bg": None,
+            }
+            viewer = self._mpl_cam_viewer
+
+            if not getattr(self, "_mpl_cam_viewer_opened", False):
+                self._mpl_cam_viewer_opened = True
+                try:
+                    backend = matplotlib.get_backend()
+                except Exception:
+                    backend = "<unknown>"
+                print(f"[viewer] Opened Matplotlib camera window '{window_title}' (backend={backend}, DISPLAY={os.environ.get('DISPLAY')})")
+
+            # Explicitly show + flush events (helps on Qt backends).
+            try:
+                # Some backends need an explicit show() to create the window.
+                plt.show(block=False)
+                fig.show()
+                fig.canvas.draw()
+                fig.canvas.flush_events()
+
+                # Optional: faster updates via blitting.
+                if bool(use_blit):
+                    try:
+                        viewer["blit_bg"] = fig.canvas.copy_from_bbox(ax.bbox)
+
+                        def _on_resize(_evt):
+                            try:
+                                viewer["blit_bg"] = None
+                            except Exception:
+                                pass
+
+                        fig.canvas.mpl_connect("resize_event", _on_resize)
+                    except Exception:
+                        viewer["blit_bg"] = None
+                # Try to hide toolbar (Qt backend) to reduce visual clutter.
+                try:
+                    mgr = getattr(fig.canvas, "manager", None)
+                    tb = getattr(mgr, "toolbar", None) if mgr is not None else None
+                    if tb is not None and hasattr(tb, "setVisible"):
+                        tb.setVisible(False)
+                except Exception:
+                    pass
+                if show_depth and depth_fig is not None:
+                    plt.show(block=False)
+                    depth_fig.show()
+                    depth_fig.canvas.draw()
+                    depth_fig.canvas.flush_events()
+                    try:
+                        mgr = getattr(depth_fig.canvas, "manager", None)
+                        tb = getattr(mgr, "toolbar", None) if mgr is not None else None
+                        if tb is not None and hasattr(tb, "setVisible"):
+                            tb.setVisible(False)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                # Don't spam logs in the control loop.
+                if not getattr(self, "_mpl_cam_viewer_warned", False):
+                    self._mpl_cam_viewer_warned = True
+                    backend = None
+                    try:
+                        backend = matplotlib.get_backend()
+                    except Exception:
+                        backend = "<unknown>"
+                    print(f"[visualize_cameras_matplotlib] Failed to show window (backend={backend}): {exc}")
+                self._mpl_cam_viewer = None
+                return False
+
+        # If user closed the window, stop.
+        try:
+            import matplotlib.pyplot as plt
+            if not plt.fignum_exists(viewer["fig"].number):
+                self._mpl_cam_viewer = None
+                return False
+        except Exception:
+            pass
+
+        # Update images
+        viewer["im"].set_data(_make_mosaic(rgb_frames))
+        if show_depth and viewer.get("depth_fig") is not None and viewer.get("depth_im") is not None:
+            viewer["depth_im"].set_data(_make_depth_mosaic(depth_frames))
+
+        try:
+            if bool(viewer.get("use_blit", False)):
+                fig = viewer["fig"]
+                ax = viewer["ax"]
+                bg = viewer.get("blit_bg")
+                if bg is None:
+                    fig.canvas.draw()
+                    bg = fig.canvas.copy_from_bbox(ax.bbox)
+                    viewer["blit_bg"] = bg
+                fig.canvas.restore_region(bg)
+                ax.draw_artist(viewer["im"])
+                fig.canvas.blit(ax.bbox)
+                fig.canvas.flush_events()
+            else:
+                viewer["fig"].canvas.draw_idle()
+                viewer["fig"].canvas.flush_events()
+            if show_depth and viewer.get("depth_fig") is not None:
+                viewer["depth_fig"].canvas.draw_idle()
+                viewer["depth_fig"].canvas.flush_events()
+            plt.pause(float(pause_s))
+            return True
+        except Exception:
+            return False
 
     def _get_arm(self, arm: str | None):
         arm = self.active_arm if arm is None else arm
@@ -408,6 +1136,13 @@ class Environment:
         """
         p.stepSimulation()
         if self.vis:
+            # Update camera frame axis visualization (wrist-mounted cameras).
+            if getattr(self, "draw_camera_frame_debug", False):
+                try:
+                    self._update_camera_frame_debug()
+                except Exception:
+                    # Debug viz should never break the simulation.
+                    pass
             if self.debug:
                 if self.eef_debug_lineID is not None:
                     p.removeUserDebugItem(self.eef_debug_lineID)
@@ -415,7 +1150,340 @@ class Environment:
                 end = np.array(eef_xyz[0])
                 end[2] -= 0.5
                 self.eef_debug_lineID = p.addUserDebugLine(np.array(eef_xyz[0]), end, [1, 0, 0])
+
+            # Optional camera stream driven by stepping (useful when the caller
+            # does not explicitly call visualize_cameras_matplotlib() every loop).
+            if getattr(self, "auto_stream_cameras", False):
+                try:
+                    self.visualize_cameras_matplotlib(
+                        which=getattr(self, "auto_stream_cameras_which", ("external", "head", "left", "right")),
+                        show_depth=bool(getattr(self, "auto_stream_cameras_show_depth", False)),
+                        window_title="cameras",
+                        pause_s=float(getattr(self, "auto_stream_cameras_pause_s", 0.001)),
+                        max_fps=float(getattr(self, "auto_stream_cameras_max_fps", 10.0)),
+                        use_blit=bool(getattr(self, "auto_stream_cameras_use_blit", True)),
+                    )
+                except Exception:
+                    pass
             time.sleep(self.SIMULATION_STEP_DELAY)
+
+    def enable_camera_frame_debug(self, enabled: bool = True, clear_existing: bool = True):
+        """Enable/disable the wrist-camera debug axes + target rays.
+
+        Disabling this can significantly speed up GUI simulations.
+        """
+        enabled_b = bool(enabled)
+        if not enabled_b and clear_existing:
+            # Remove existing debug items so they disappear immediately.
+            for store in (
+                getattr(self, "_camera_frame_debug_ids", {}),
+                getattr(self, "_camera_render_frame_debug_ids", {}),
+                getattr(self, "_camera_target_debug_ids", {}),
+            ):
+                try:
+                    for ids in list(store.values()):
+                        for uid in list(ids.values()):
+                            try:
+                                if int(uid) >= 0:
+                                    p.removeUserDebugItem(int(uid))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                try:
+                    store.clear()
+                except Exception:
+                    pass
+
+        self.draw_camera_frame_debug = enabled_b
+
+    def enable_camera_streaming(
+        self,
+        enabled: bool = True,
+        which: Iterable[str] = ("external", "head", "left", "right"),
+        show_depth: bool = False,
+        max_fps: float = 10.0,
+        pause_s: float = 0.001,
+        use_blit: bool = True,
+    ):
+        """Enable/disable auto camera streaming driven by step_simulation()."""
+        self.auto_stream_cameras = bool(enabled)
+        self.auto_stream_cameras_which = tuple(str(s).lower() for s in which)
+        self.auto_stream_cameras_show_depth = bool(show_depth)
+        self.auto_stream_cameras_max_fps = float(max_fps)
+        self.auto_stream_cameras_pause_s = float(pause_s)
+        self.auto_stream_cameras_use_blit = bool(use_blit)
+
+    def _update_link_frame_debug(self, key: str, link_index: int, axis_len: float | None = None):
+        axis_len = float(self.camera_frame_axis_len if axis_len is None else axis_len)
+        ls = p.getLinkState(self.robot_id, link_index, computeForwardKinematics=True)
+        link_pos, link_orn = (ls[4], ls[5]) if len(ls) >= 6 else (ls[0], ls[1])
+        m = p.getMatrixFromQuaternion(link_orn)
+
+        x_axis = (float(m[0]), float(m[3]), float(m[6]))
+        y_axis = (float(m[1]), float(m[4]), float(m[7]))
+        z_axis = (float(m[2]), float(m[5]), float(m[8]))
+
+        origin = (float(link_pos[0]), float(link_pos[1]), float(link_pos[2]))
+        x_end = (origin[0] + axis_len * x_axis[0], origin[1] + axis_len * x_axis[1], origin[2] + axis_len * x_axis[2])
+        y_end = (origin[0] + axis_len * y_axis[0], origin[1] + axis_len * y_axis[1], origin[2] + axis_len * y_axis[2])
+        z_end = (origin[0] + axis_len * z_axis[0], origin[1] + axis_len * z_axis[1], origin[2] + axis_len * z_axis[2])
+
+        ids = self._camera_frame_debug_ids.get(key)
+        if ids is None:
+            ids = {"x": -1, "y": -1, "z": -1}
+            self._camera_frame_debug_ids[key] = ids
+
+        ids["x"] = p.addUserDebugLine(origin, x_end, [1, 0, 0], lineWidth=3, replaceItemUniqueId=int(ids["x"]))
+        ids["y"] = p.addUserDebugLine(origin, y_end, [0, 1, 0], lineWidth=3, replaceItemUniqueId=int(ids["y"]))
+        ids["z"] = p.addUserDebugLine(origin, z_end, [0, 0, 1], lineWidth=3, replaceItemUniqueId=int(ids["z"]))
+
+    @staticmethod
+    def _rot_vec_world(quat_xyzw, v_local_xyz):
+        m = p.getMatrixFromQuaternion(quat_xyzw)
+        return (
+            float(m[0]) * float(v_local_xyz[0]) + float(m[1]) * float(v_local_xyz[1]) + float(m[2]) * float(v_local_xyz[2]),
+            float(m[3]) * float(v_local_xyz[0]) + float(m[4]) * float(v_local_xyz[1]) + float(m[5]) * float(v_local_xyz[2]),
+            float(m[6]) * float(v_local_xyz[0]) + float(m[7]) * float(v_local_xyz[1]) + float(m[8]) * float(v_local_xyz[2]),
+        )
+
+    def _get_fingertip_marker(self, arm: str, tool_pos):
+        """Estimate a point near the fingertip for the given arm.
+
+        Uses the midpoint between inner finger pad links and extrapolates outward
+        away from tool0 by roughly FINGER_LENGTH.
+
+        Returns:
+            (x, y, z) tuple in world coordinates, or None if unavailable.
+        """
+        try:
+            left_pad_id, right_pad_id = self._get_pad_joint_ids(arm)
+            ls_l = p.getLinkState(self.robot_id, int(left_pad_id), computeForwardKinematics=True)
+            ls_r = p.getLinkState(self.robot_id, int(right_pad_id), computeForwardKinematics=True)
+            pos_l = ls_l[4] if len(ls_l) >= 6 else ls_l[0]
+            pos_r = ls_r[4] if len(ls_r) >= 6 else ls_r[0]
+            mid = np.array(
+                [
+                    0.5 * (float(pos_l[0]) + float(pos_r[0])),
+                    0.5 * (float(pos_l[1]) + float(pos_r[1])),
+                    0.5 * (float(pos_l[2]) + float(pos_r[2])),
+                ],
+                dtype=float,
+            )
+            tp = np.array([float(tool_pos[0]), float(tool_pos[1]), float(tool_pos[2])], dtype=float)
+            d = mid - tp
+            n = float(np.linalg.norm(d) + 1e-12)
+            d = d / n
+            tip = mid + float(getattr(self, "FINGER_LENGTH", 0.06)) * d
+            return (float(tip[0]), float(tip[1]), float(tip[2]))
+        except Exception:
+            return None
+
+    def _wrist_camera_eye_axes_target(self, arm: str):
+        """Compute wrist camera debug geometry.
+
+        Camera frame definition here is graphics-style:
+        - X (red): right
+        - Y (green): up
+        - Z (blue): forward (view direction)
+        """
+        if arm not in ("left", "right"):
+            raise ValueError("arm must be 'left' or 'right'")
+
+        if arm == "left":
+            cam_obj = self.left_arm_camera
+            link_name = self._left_arm_camera_link_name
+            tool_link = self.left_eef_id
+        else:
+            cam_obj = self.right_arm_camera
+            link_name = self._right_arm_camera_link_name
+            tool_link = self.right_eef_id
+
+        if cam_obj is None or link_name is None:
+            raise RuntimeError("Wrist camera not available")
+
+        link_index = self.link_name_to_id[link_name]
+        ls = p.getLinkState(self.robot_id, link_index, computeForwardKinematics=True)
+        link_pos, link_orn = (ls[4], ls[5]) if len(ls) >= 6 else (ls[0], ls[1])
+
+        # Apply parent->camera transform (same as LinkCamera).
+        cam_pos, cam_orn = p.multiplyTransforms(
+            link_pos,
+            link_orn,
+            cam_obj.parent_to_camera_xyz,
+            cam_obj.parent_to_camera_quat,
+        )
+
+        fwd_axis = cam_obj.forward_axis
+        # Match LinkCamera: eye_offset always uses the configured forward axis
+        # (even if we later flip fwd for aiming).
+        fwd_world_for_offset = self._rot_vec_world(cam_orn, fwd_axis)
+        fwd_world = fwd_world_for_offset
+        up_world = self._rot_vec_world(cam_orn, cam_obj.up_axis)
+
+        # Ensure forward points away from tool0 (avoid looking into gripper base).
+        tool_ls = p.getLinkState(self.robot_id, tool_link, computeForwardKinematics=True)
+        tool_pos = tool_ls[4] if len(tool_ls) >= 6 else tool_ls[0]
+        to_tool = (
+            float(tool_pos[0]) - float(cam_pos[0]),
+            float(tool_pos[1]) - float(cam_pos[1]),
+            float(tool_pos[2]) - float(cam_pos[2]),
+        )
+        if (fwd_world[0] * to_tool[0] + fwd_world[1] * to_tool[1] + fwd_world[2] * to_tool[2]) > 0.0:
+            fwd_axis = (-float(fwd_axis[0]), -float(fwd_axis[1]), -float(fwd_axis[2]))
+            fwd_world = self._rot_vec_world(cam_orn, fwd_axis)
+
+        # Eye offset (push the render origin out of camera housing).
+        # `cam_pos` is the camera link/optical origin (after parent_to_camera_*).
+        # `eye` must match the exact render eye used by LinkCamera.
+        eye = (
+            float(cam_pos[0]) + float(cam_obj.eye_offset) * float(fwd_world_for_offset[0]),
+            float(cam_pos[1]) + float(cam_obj.eye_offset) * float(fwd_world_for_offset[1]),
+            float(cam_pos[2]) + float(cam_obj.eye_offset) * float(fwd_world_for_offset[2]),
+        )
+
+        # Build an orthonormal camera-local basis in world coordinates.
+        # We'll use this basis to apply (x,y,z) offsets in the camera frame:
+        # X=right, Y=up, Z=forward.
+        right_basis = np.cross(np.array(fwd_world, dtype=float), np.array(up_world, dtype=float))
+        rn = float(np.linalg.norm(right_basis) + 1e-12)
+        right_basis = (right_basis / rn).tolist()
+        up_basis = np.cross(np.array(right_basis, dtype=float), np.array(fwd_world, dtype=float))
+        un = float(np.linalg.norm(up_basis) + 1e-12)
+        up_basis = (up_basis / un).tolist()
+
+        ox = 0.0 if getattr(self, "wrist_cam_look_ahead_x", None) is None else float(self.wrist_cam_look_ahead_x)
+        oz = float(self.wrist_cam_look_ahead) if getattr(self, "wrist_cam_look_ahead_z", None) is None else float(self.wrist_cam_look_ahead_z)
+        if getattr(self, "wrist_cam_look_ahead_y", None) is None:
+            tilt_deg = float(getattr(self, "wrist_cam_tilt_down", 0.0))
+            oy = -math.tan(math.radians(tilt_deg)) * oz
+        else:
+            oy = float(self.wrist_cam_look_ahead_y)
+
+        target = (
+            float(eye[0]) + oz * float(fwd_world[0]) + oy * float(up_basis[0]) + ox * float(right_basis[0]),
+            float(eye[1]) + oz * float(fwd_world[1]) + oy * float(up_basis[1]) + ox * float(right_basis[1]),
+            float(eye[2]) + oz * float(fwd_world[2]) + oy * float(up_basis[2]) + ox * float(right_basis[2]),
+        )
+
+        # Match rendering: if fingertip estimate is available, look through it.
+        fingertip = self._get_fingertip_marker(arm, tool_pos)
+        if fingertip is not None:
+            dv = np.array(
+                [
+                    float(fingertip[0]) - float(eye[0]),
+                    float(fingertip[1]) - float(eye[1]),
+                    float(fingertip[2]) - float(eye[2]),
+                ],
+                dtype=float,
+            )
+            if float(np.linalg.norm(dv)) > 1e-6:
+                target = fingertip
+
+        # Rendered view direction is the look-at vector (target - eye).
+        aim = np.array(
+            [float(target[0]) - float(eye[0]), float(target[1]) - float(eye[1]), float(target[2]) - float(eye[2])],
+            dtype=float,
+        )
+        aim_n = float(np.linalg.norm(aim) + 1e-12)
+        aim = (aim / aim_n).tolist()
+
+        # Build a rendered camera frame from (aim, up_world).
+        # This matches how `computeViewMatrix(eye, target, up)` defines the view.
+        up_w = np.array(up_world, dtype=float)
+        up_proj = up_w - float(np.dot(up_w, aim)) * np.array(aim, dtype=float)
+        up_n = float(np.linalg.norm(up_proj) + 1e-12)
+        up = (up_proj / up_n).tolist()
+        right = np.cross(np.array(up, dtype=float), np.array(aim, dtype=float))
+        rn = float(np.linalg.norm(right) + 1e-12)
+        right = (right / rn).tolist()
+
+        # Return axes as tuples.
+        x_axis = (float(right[0]), float(right[1]), float(right[2]))
+        y_axis = (float(up[0]), float(up[1]), float(up[2]))
+        z_axis = (float(aim[0]), float(aim[1]), float(aim[2]))
+        origin = (float(cam_pos[0]), float(cam_pos[1]), float(cam_pos[2]))
+        tool_pos_t = (float(tool_pos[0]), float(tool_pos[1]), float(tool_pos[2]))
+        return origin, eye, (x_axis, y_axis, z_axis), target, tool_pos_t
+
+    def _update_camera_render_frame_debug(self, key: str, eye, axes, axis_len: float | None = None):
+        axis_len = float(self.camera_render_frame_axis_len if axis_len is None else axis_len)
+        x_axis, y_axis, z_axis = axes
+        origin = (float(eye[0]), float(eye[1]), float(eye[2]))
+
+        x_end = (origin[0] + axis_len * x_axis[0], origin[1] + axis_len * x_axis[1], origin[2] + axis_len * x_axis[2])
+        y_end = (origin[0] + axis_len * y_axis[0], origin[1] + axis_len * y_axis[1], origin[2] + axis_len * y_axis[2])
+        z_end = (origin[0] + axis_len * z_axis[0], origin[1] + axis_len * z_axis[1], origin[2] + axis_len * z_axis[2])
+
+        ids = self._camera_render_frame_debug_ids.get(key)
+        if ids is None:
+            ids = {"x": -1, "y": -1, "z": -1}
+            self._camera_render_frame_debug_ids[key] = ids
+
+        # Thicker than link-frame axes.
+        ids["x"] = p.addUserDebugLine(origin, x_end, [1, 0, 0], lineWidth=7, replaceItemUniqueId=int(ids["x"]))
+        ids["y"] = p.addUserDebugLine(origin, y_end, [0, 1, 0], lineWidth=7, replaceItemUniqueId=int(ids["y"]))
+        ids["z"] = p.addUserDebugLine(origin, z_end, [0, 0, 1], lineWidth=7, replaceItemUniqueId=int(ids["z"]))
+
+    def _update_camera_target_debug(self, key: str, eye, target, marker=None):
+        eye = (float(eye[0]), float(eye[1]), float(eye[2]))
+        target = (float(target[0]), float(target[1]), float(target[2]))
+
+        if marker is None:
+            marker = target
+        marker = (float(marker[0]), float(marker[1]), float(marker[2]))
+
+        ids = self._camera_target_debug_ids.get(key)
+        if ids is None:
+            ids = {"ray": -1, "cx": -1, "cy": -1, "cz": -1}
+            self._camera_target_debug_ids[key] = ids
+
+        # Eye-to-target ray (yellow)
+        ids["ray"] = p.addUserDebugLine(eye, target, [1, 1, 0], lineWidth=3, replaceItemUniqueId=int(ids["ray"]))
+
+        # Small cross at marker point (yellow)
+        s = 0.03
+        cx0 = (marker[0] - s, marker[1], marker[2])
+        cx1 = (marker[0] + s, marker[1], marker[2])
+        cy0 = (marker[0], marker[1] - s, marker[2])
+        cy1 = (marker[0], marker[1] + s, marker[2])
+        cz0 = (marker[0], marker[1], marker[2] - s)
+        cz1 = (marker[0], marker[1], marker[2] + s)
+        ids["cx"] = p.addUserDebugLine(cx0, cx1, [1, 1, 0], lineWidth=3, replaceItemUniqueId=int(ids["cx"]))
+        ids["cy"] = p.addUserDebugLine(cy0, cy1, [1, 1, 0], lineWidth=3, replaceItemUniqueId=int(ids["cy"]))
+        ids["cz"] = p.addUserDebugLine(cz0, cz1, [1, 1, 0], lineWidth=3, replaceItemUniqueId=int(ids["cz"]))
+
+    def _update_camera_frame_debug(self):
+        if not getattr(self, "draw_camera_frame_debug", False):
+            return
+        # Wrist-mounted camera links
+        if getattr(self, "_left_arm_camera_link_name", None) in getattr(self, "link_name_to_id", {}):
+            li = self.link_name_to_id[self._left_arm_camera_link_name]
+            self._update_link_frame_debug("left_cam", li)
+            origin, eye, axes, target, tool_pos = self._wrist_camera_eye_axes_target("left")
+            # Draw the thick frame at the physical camera origin so it aligns with the mesh.
+            self._update_camera_render_frame_debug("left_cam", origin, axes)
+            # Draw the ray so it passes through the finger tips (preferred),
+            # falling back to tool0 if fingertip links are unavailable.
+            marker = self._get_fingertip_marker("left", tool_pos) or tool_pos
+            v = np.array([marker[0] - origin[0], marker[1] - origin[1], marker[2] - origin[2]], dtype=float)
+            n = float(np.linalg.norm(v) + 1e-12)
+            d = v / n
+            ray_len = 2.0
+            ray_target = (origin[0] + ray_len * float(d[0]), origin[1] + ray_len * float(d[1]), origin[2] + ray_len * float(d[2]))
+            self._update_camera_target_debug("left_cam", origin, ray_target, marker=marker)
+        if getattr(self, "_right_arm_camera_link_name", None) in getattr(self, "link_name_to_id", {}):
+            ri = self.link_name_to_id[self._right_arm_camera_link_name]
+            self._update_link_frame_debug("right_cam", ri)
+            origin, eye, axes, target, tool_pos = self._wrist_camera_eye_axes_target("right")
+            self._update_camera_render_frame_debug("right_cam", origin, axes)
+            marker = self._get_fingertip_marker("right", tool_pos) or tool_pos
+            v = np.array([marker[0] - origin[0], marker[1] - origin[1], marker[2] - origin[2]], dtype=float)
+            n = float(np.linalg.norm(v) + 1e-12)
+            d = v / n
+            ray_len = 2.0
+            ray_target = (origin[0] + ray_len * float(d[0]), origin[1] + ray_len * float(d[1]), origin[2] + ray_len * float(d[2]))
+            self._update_camera_target_debug("right_cam", origin, ray_target, marker=marker)
 
     @staticmethod
     def is_still(handle):

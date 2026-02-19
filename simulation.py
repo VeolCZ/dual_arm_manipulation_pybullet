@@ -10,6 +10,8 @@ import sys
 import cv2
 import math
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 import time
 import traceback
 
@@ -34,7 +36,9 @@ class GrasppingScenarios():
         self.CAM_Z = 1.9
         self.depth_radius = 1
         self.ATTEMPTS = 3
-        self.fig = plt.figure(figsize=(10, 10))
+        # Offscreen figure for optional network visualisations (avoids opening a GUI window).
+        self.fig = Figure(figsize=(10, 10))
+        FigureCanvasAgg(self.fig)
        
                 
     def draw_predicted_grasp(self,grasps,color = [0,0,1],lineIDs = []):
@@ -62,15 +66,25 @@ class GrasppingScenarios():
         for line in lineIDs:
             p.removeUserDebugItem(line)
     
-    def dummy_simulation_steps(self,n):
-        for _ in range(n):
-            p.stepSimulation()
+    def dummy_simulation_steps(self, n, env: Environment | None = None):
+        """Advance the physics simulation.
 
-    def is_there_any_object(self,camera):
-        self.dummy_simulation_steps(10)
+        If an `Environment` is provided, route stepping through `env.step_simulation()`
+        so GUI debug visualisations (camera frames, target rays, etc.) stay in sync.
+        """
+        for _ in range(int(n)):
+            if env is None:
+                p.stepSimulation()
+            else:
+                env.step_simulation()
+
+    def is_there_any_object(self, camera, env: Environment | None = None):
+        # Route stepping through Environment when available so GUI debug + camera
+        # streaming hooks stay in sync.
+        self.dummy_simulation_steps(10, env=env)
         rgb, depth, _ = camera.get_cam_img()
-        print ("min RGB = ", rgb.min(), "max RGB = ", rgb.max(), "rgb.avg() = ", np.average(rgb))
-        print ("min depth = ", depth.min(), "max depth = ", depth.max())
+        # print ("min RGB = ", rgb.min(), "max RGB = ", rgb.max(), "rgb.avg() = ", np.average(rgb))
+        # print ("min depth = ", depth.min(), "max depth = ", depth.max())
         if (depth.max()- depth.min() < 0.0025):
             return False
         else:
@@ -88,11 +102,25 @@ class GrasppingScenarios():
         data = IsolatedObjData(objects.obj_names, runs, 'results')
 
         ## camera settings: cam_pos, cam_target, near, far, size, fov
-        center_x, center_y, center_z = 0.05, -0.52, self.CAM_Z
+        center_x, center_y, center_z = 0.0, -0.54, self.CAM_Z
         camera = Camera((center_x, center_y, center_z), (center_x, center_y, 0.785), 0.2, 2.0, (self.IMG_SIZE, self.IMG_SIZE), 40)
         env = Environment(camera, vis=vis, debug=debug, finger_length=0.06)
+
+        # If we're visualizing, let Environment drive the Matplotlib stream on each sim step.
+        if vis:
+            try:
+                env.enable_camera_streaming(enabled=True, show_depth=False, max_fps=5.0, use_blit=True)
+            except Exception:
+                pass
+            # Disable expensive debug drawing (axes + rays) for speed.
+            try:
+                env.enable_camera_frame_debug(enabled=False)
+            except Exception:
+                pass
         
         generator = GraspGenerator(self.network_path, camera, self.depth_radius, self.fig, self.IMG_SIZE, self.network_model, device)
+
+        viewer_warned = False
         
         objects.shuffle_objects()
         for i in range(runs):
@@ -107,7 +135,7 @@ class GrasppingScenarios():
                
                 path, mod_orn, mod_stiffness = objects.get_obj_info(obj_name)
                 env.load_isolated_obj(path, mod_orn, mod_stiffness)
-                self.dummy_simulation_steps(20)
+                self.dummy_simulation_steps(20, env=env)
 
                 try:
                     env._refresh_rendering()
@@ -118,16 +146,47 @@ class GrasppingScenarios():
                 number_of_failures = 0
                 idx = 0 ## select the best grasp configuration
                 failed_grasp_counter = 0
-                while self.is_there_any_object(camera) and number_of_failures < number_of_attempts:     
+                while self.is_there_any_object(camera, env=env) and number_of_failures < number_of_attempts:     
                     
                     bgr, depth, _ = camera.get_cam_img()
+
+                    if vis and not getattr(env, "auto_stream_cameras", False):
+                        # Prefer Matplotlib viewer (avoids OpenCV GUI backend issues).
+                        ok = False
+                        try:
+                            ok = env.visualize_cameras_matplotlib(show_depth=False, window_title="cameras", pause_s=0.001, max_fps=10.0)
+                        except Exception as exc:
+                            ok = False
+                            if not viewer_warned:
+                                viewer_warned = True
+                                print(f"[viewer] Matplotlib viewer failed: {exc}")
+
+                        # Fallback: OpenCV multi-camera viewer.
+                        if not ok:
+                            try:
+                                ok = env.visualize_cameras(show_depth=False, window_name="cameras", wait_ms=1)
+                            except Exception as exc:
+                                ok = False
+                                if not viewer_warned:
+                                    viewer_warned = True
+                                    print(f"[viewer] OpenCV mosaic viewer failed: {exc}")
+
+                        # Final fallback: legacy single external-camera window.
+                        if not ok:
+                            try:
+                                cv2.imshow('rgb', bgr)
+                                cv2.waitKey(1)
+                            except Exception as exc:
+                                if not viewer_warned:
+                                    viewer_warned = True
+                                    print(f"[viewer] OpenCV imshow failed (likely headless): {exc}")
 
                     ##convert BGR to RGB
                     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                               
                     grasps, save_name = generator.predict_grasp( rgb, depth, n_grasps=number_of_attempts, show_output=output)
                     if (grasps == []):
-                        self.dummy_simulation_steps(50)
+                        self.dummy_simulation_steps(50, env=env)
                         #print ("could not find a grasp point!")
                         if failed_grasp_counter > 3:
                             print("Failed to find a grasp points > 3 times. Skipping.")
@@ -151,7 +210,7 @@ class GrasppingScenarios():
                             LID = self.draw_predicted_grasp(g,color=[1,0,1],lineIDs=LID)
                         time.sleep(0.5)
                         self.remove_drawing(LID)
-                        self.dummy_simulation_steps(10)
+                        self.dummy_simulation_steps(10, env=env)
                         
 
                     lineIDs = self.draw_predicted_grasp(grasps[idx])
@@ -222,10 +281,22 @@ class GrasppingScenarios():
         center_x, center_y, center_z = 0.05, -0.52, self.CAM_Z
         camera = Camera((center_x, center_y, center_z), (center_x, center_y, 0.785), 0.2, 2.0, (self.IMG_SIZE, self.IMG_SIZE), 40)
         env = Environment(camera, vis=vis, debug=debug, finger_length=0.06)
+
+        if vis:
+            try:
+                env.enable_camera_streaming(enabled=True, show_depth=False, max_fps=5.0, use_blit=True)
+            except Exception:
+                pass
+            try:
+                env.enable_camera_frame_debug(enabled=False)
+            except Exception:
+                pass
         
         generator = GraspGenerator(self.network_path, camera, self.depth_radius, self.fig, self.IMG_SIZE, self.network_model, device)
 
         
+        viewer_warned = False
+
         for i in range(runs):
             env.remove_all_obj()
             env.reset_robot()              
@@ -256,7 +327,7 @@ class GrasppingScenarios():
             failed_grasp_counter = 0
             flag_failed_grasp_counter= False
 
-            while self.is_there_any_object(camera) and number_of_failures < number_of_attempts:                
+            while self.is_there_any_object(camera, env=env) and number_of_failures < number_of_attempts:                
                 #env.move_arm_away()
                 try: 
                     idx = 0 ## select the best grasp configuration
@@ -264,16 +335,41 @@ class GrasppingScenarios():
                         data.add_try()  
                         bgr, depth, _ = camera.get_cam_img()
                         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                        if vis:
+                        if vis and not getattr(env, "auto_stream_cameras", False):
+                            # Prefer Matplotlib viewer (avoids OpenCV GUI backend issues).
+                            ok = False
                             try:
-                                cv2.imshow('rgb', bgr)
-                                cv2.waitKey(1)
-                            except cv2.error:
-                                pass
+                                ok = env.visualize_cameras_matplotlib(show_depth=False, window_title="cameras", pause_s=0.001, max_fps=10.0)
+                            except Exception as exc:
+                                ok = False
+                                if not viewer_warned:
+                                    viewer_warned = True
+                                    print(f"[viewer] Matplotlib viewer failed: {exc}")
+
+                            # Fallback: OpenCV multi-camera viewer.
+                            if not ok:
+                                try:
+                                    ok = env.visualize_cameras(show_depth=False, window_name="cameras", wait_ms=1)
+                                except Exception as exc:
+                                    ok = False
+                                    if not viewer_warned:
+                                        viewer_warned = True
+                                        print(f"[viewer] OpenCV mosaic viewer failed: {exc}")
+
+                            # Final fallback: legacy single external-camera window.
+                            if not ok:
+                                try:
+                                    cv2.imshow('rgb', bgr)
+                                    cv2.waitKey(1)
+                                except Exception as exc:
+                                    pass
+                                    if not viewer_warned:
+                                        viewer_warned = True
+                                        print(f"[viewer] OpenCV imshow failed (likely headless): {exc}")
 
                         grasps, save_name = generator.predict_grasp( rgb, depth, n_grasps=number_of_attempts, show_output=output)
                         if (grasps == []):
-                                self.dummy_simulation_steps(30)
+                                self.dummy_simulation_steps(30, env=env)
                                 print ("could not find a grasp point!")    
                                 if failed_grasp_counter > 5:
                                     print("Failed to find a grasp points > 3 times. Skipping.")
@@ -289,7 +385,7 @@ class GrasppingScenarios():
                                 LID = self.draw_predicted_grasp(g,color=[1,0,1],lineIDs=LID)
                             time.sleep(0.5)
                             self.remove_drawing(LID)
-                            self.dummy_simulation_steps(20)
+                            self.dummy_simulation_steps(20, env=env)
                             
                         #print ("grasps.length = ", len(grasps))
                         if (idx > len(grasps)-1):  
