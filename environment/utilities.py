@@ -319,8 +319,10 @@ class Camera:
         self.view_matrix = p.computeViewMatrix(cam_pos, cam_target, [0, 1, 0])
 
         self.rec_id = None
+        # Optional default renderer for getCameraImage (set by Environment).
+        self.default_renderer = None
 
-    def get_cam_img(self):
+    def get_cam_img(self, return_depth: bool = True, return_seg: bool = True, renderer=None):
         """
         Method to get images from camera
         return:
@@ -328,11 +330,38 @@ class Camera:
         depth
         segmentation mask
         """
-        # Get depth values using the OpenGL renderer
-        _w, _h, rgb, depth, seg = p.getCameraImage(self.width, self.height,
-                                                   self.view_matrix, self.projection_matrix,
-                                                   )
-        return rgb[:, :, 0:3], depth, seg
+        flags = None
+        if not bool(return_seg):
+            flags = getattr(p, "ER_NO_SEGMENTATION_MASK", None)
+
+        if renderer is None:
+            renderer = getattr(self, "default_renderer", None)
+        renderer_kw = {}
+        if renderer is not None:
+            renderer_kw["renderer"] = renderer
+
+        if flags is None:
+            _w, _h, rgb, depth, seg = p.getCameraImage(
+                self.width,
+                self.height,
+                self.view_matrix,
+                self.projection_matrix,
+                **renderer_kw,
+            )
+        else:
+            _w, _h, rgb, depth, seg = p.getCameraImage(
+                self.width,
+                self.height,
+                self.view_matrix,
+                self.projection_matrix,
+                flags=flags,
+                **renderer_kw,
+            )
+
+        rgb_out = rgb[:, :, 0:3]
+        depth_out = depth if bool(return_depth) else None
+        seg_out = seg if bool(return_seg) else None
+        return rgb_out, depth_out, seg_out
 
     def start_recording(self, save_dir):
         if not os.path.exists(save_dir):
@@ -381,6 +410,8 @@ class LinkCamera:
         self.forward_axis = tuple(float(v) for v in forward_axis)
         self.up_axis = tuple(float(v) for v in up_axis)
         self.eye_offset = float(eye_offset)
+        # Optional default renderer for getCameraImage (set by Environment).
+        self.default_renderer = None
 
     @staticmethod
     def _rotate_vec(quat_xyzw, v):
@@ -392,7 +423,15 @@ class LinkCamera:
         z = m[6] * float(v[0]) + m[7] * float(v[1]) + m[8] * float(v[2])
         return (x, y, z)
 
-    def get_cam_img(self, robot_id: int, link_index: int, target_world=None):
+    def get_cam_img(
+        self,
+        robot_id: int,
+        link_index: int,
+        target_world=None,
+        return_depth: bool = True,
+        return_seg: bool = True,
+        renderer=None,
+    ):
         """Render RGB, depth, seg from a link.
 
         Args:
@@ -445,5 +484,35 @@ class LinkCamera:
             target = [float(target_world[0]), float(target_world[1]), float(target_world[2])]
         view_matrix = p.computeViewMatrix(cam_pos, target, up_world)
 
-        _w, _h, rgb, depth, seg = p.getCameraImage(self.width, self.height, view_matrix, self.projection_matrix)
-        return rgb[:, :, 0:3], depth, seg
+        if renderer is None:
+            renderer = getattr(self, "default_renderer", None)
+
+        flags = None
+        if not bool(return_seg):
+            flags = getattr(p, "ER_NO_SEGMENTATION_MASK", None)
+
+        renderer_kw = {}
+        if renderer is not None:
+            renderer_kw["renderer"] = renderer
+
+        if flags is None:
+            _w, _h, rgb, depth, seg = p.getCameraImage(
+                self.width,
+                self.height,
+                view_matrix,
+                self.projection_matrix,
+                **renderer_kw,
+            )
+        else:
+            _w, _h, rgb, depth, seg = p.getCameraImage(
+                self.width,
+                self.height,
+                view_matrix,
+                self.projection_matrix,
+                flags=flags,
+                **renderer_kw,
+            )
+        rgb_out = rgb[:, :, 0:3]
+        depth_out = depth if bool(return_depth) else None
+        seg_out = seg if bool(return_seg) else None
+        return rgb_out, depth_out, seg_out

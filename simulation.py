@@ -15,6 +15,8 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 import time
 import traceback
 
+# env.profile_camera_capture(iters=20, renderer=p.ER_BULLET_HARDWARE_OPENGL)
+# env.profile_camera_capture(iters=20, renderer=p.ER_TINY_RENDERER)
 
 class GrasppingScenarios():
 
@@ -74,6 +76,12 @@ class GrasppingScenarios():
         """
         for _ in range(int(n)):
             if env is None:
+                
+                try:
+                    env._refresh_rendering()
+                except Exception:
+                    pass
+
                 p.stepSimulation()
             else:
                 env.step_simulation()
@@ -82,7 +90,7 @@ class GrasppingScenarios():
         # Route stepping through Environment when available so GUI debug + camera
         # streaming hooks stay in sync.
         self.dummy_simulation_steps(10, env=env)
-        rgb, depth, _ = camera.get_cam_img()
+        _, depth, _ = camera.get_cam_img(return_depth=True, return_seg=False)
         # print ("min RGB = ", rgb.min(), "max RGB = ", rgb.max(), "rgb.avg() = ", np.average(rgb))
         # print ("min depth = ", depth.min(), "max depth = ", depth.max())
         if (depth.max()- depth.min() < 0.0025):
@@ -104,12 +112,17 @@ class GrasppingScenarios():
         ## camera settings: cam_pos, cam_target, near, far, size, fov
         center_x, center_y, center_z = 0.0, -0.54, self.CAM_Z
         camera = Camera((center_x, center_y, center_z), (center_x, center_y, 0.785), 0.2, 2.0, (self.IMG_SIZE, self.IMG_SIZE), 40)
-        env = Environment(camera, vis=vis, debug=debug, finger_length=0.06)
+        env = Environment(camera, vis=vis, debug=debug, finger_length=0.06, hide_gui_panels=True)
+
 
         # If we're visualizing, let Environment drive the Matplotlib stream on each sim step.
+        print ("visualization = ", vis)
         if vis:
             try:
-                env.enable_camera_streaming(enabled=True, show_depth=False, max_fps=5.0, use_blit=True)
+                # print ("enabling camera streaming...")
+                # env.enable_camera_streaming(enabled=True, which=("external","head","left","right"), show_depth=False, max_fps=2.0,  pause_s=0.00001, use_blit=True)
+                # env.enable_camera_streaming(enabled=True, which=("left","right"), max_fps=5.0, pause_s=0.0, use_blit=True)
+                env.enable_camera_streaming(enabled=True, which=("external","head"), max_fps=5.0, pause_s=0.0, use_blit=True)
             except Exception:
                 pass
             # Disable expensive debug drawing (axes + rays) for speed.
@@ -137,24 +150,19 @@ class GrasppingScenarios():
                 env.load_isolated_obj(path, mod_orn, mod_stiffness)
                 self.dummy_simulation_steps(20, env=env)
 
-                try:
-                    env._refresh_rendering()
-                except Exception:
-                    pass
-
                 number_of_attempts = self.ATTEMPTS
                 number_of_failures = 0
                 idx = 0 ## select the best grasp configuration
                 failed_grasp_counter = 0
                 while self.is_there_any_object(camera, env=env) and number_of_failures < number_of_attempts:     
                     
-                    bgr, depth, _ = camera.get_cam_img()
+                    bgr, depth, _ = camera.get_cam_img(return_depth=True, return_seg=False)
 
                     if vis and not getattr(env, "auto_stream_cameras", False):
                         # Prefer Matplotlib viewer (avoids OpenCV GUI backend issues).
                         ok = False
                         try:
-                            ok = env.visualize_cameras_matplotlib(show_depth=False, window_title="cameras", pause_s=0.001, max_fps=10.0)
+                            ok = env.visualize_cameras_matplotlib(show_depth=False, window_title="cameras", visible = True, pause_s=0.001, max_fps=10.0, renderer=getattr(env, "camera_renderer", None))
                         except Exception as exc:
                             ok = False
                             if not viewer_warned:
@@ -164,7 +172,7 @@ class GrasppingScenarios():
                         # Fallback: OpenCV multi-camera viewer.
                         if not ok:
                             try:
-                                ok = env.visualize_cameras(show_depth=False, window_name="cameras", wait_ms=1)
+                                ok = env.visualize_cameras(show_depth=False, window_name="cameras", wait_ms=1, renderer=getattr(env, "camera_renderer", None))
                             except Exception as exc:
                                 ok = False
                                 if not viewer_warned:
@@ -333,13 +341,13 @@ class GrasppingScenarios():
                     idx = 0 ## select the best grasp configuration
                     for attempt_idx in range(number_of_attempts):
                         data.add_try()  
-                        bgr, depth, _ = camera.get_cam_img()
+                        bgr, depth, _ = camera.get_cam_img(return_depth=True, return_seg=False)
                         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                         if vis and not getattr(env, "auto_stream_cameras", False):
                             # Prefer Matplotlib viewer (avoids OpenCV GUI backend issues).
                             ok = False
                             try:
-                                ok = env.visualize_cameras_matplotlib(show_depth=False, window_title="cameras", pause_s=0.001, max_fps=10.0)
+                                ok = env.visualize_cameras_matplotlib(show_depth=False, window_title="cameras", pause_s=0.001, max_fps=10.0, renderer=getattr(env, "camera_renderer", None))
                             except Exception as exc:
                                 ok = False
                                 if not viewer_warned:
@@ -349,7 +357,7 @@ class GrasppingScenarios():
                             # Fallback: OpenCV multi-camera viewer.
                             if not ok:
                                 try:
-                                    ok = env.visualize_cameras(show_depth=False, window_name="cameras", wait_ms=1)
+                                    ok = env.visualize_cameras(show_depth=False, window_name="cameras", wait_ms=1, renderer=getattr(env, "camera_renderer", None))
                                 except Exception as exc:
                                     ok = False
                                     if not viewer_warned:

@@ -105,7 +105,16 @@ class Environment:
     def _tool0_quat_topdown(self):
         return self._tool0_quat_from_grasp_yaw(0.0)
 
-    def __init__(self, camera: Camera, vis=False, debug=False, gripper_type='140', finger_length=0.06) -> None:
+    def __init__(
+        self,
+        camera: Camera,
+        vis: bool = False,
+        debug: bool = False,
+        gripper_type: str = '140',
+        finger_length: float = 0.06,
+        enable_shadows: bool = False,
+        hide_gui_panels: bool = True,
+    ) -> None:
         self.vis = vis
         self.debug = debug
         self.camera = camera
@@ -115,8 +124,9 @@ class Environment:
         self.auto_stream_cameras = False
         self.auto_stream_cameras_which = ("external", "head", "left", "right")
         self.auto_stream_cameras_show_depth = False
-        self.auto_stream_cameras_max_fps = 10.0
-        self.auto_stream_cameras_pause_s = 0.001
+        self.auto_stream_cameras_max_fps = 5.0
+        # Important: avoid sleeping inside the GUI viewer when called from step_simulation().
+        self.auto_stream_cameras_pause_s = 0.0
         self.auto_stream_cameras_use_blit = True
 
         # Debug drawing (axes + rays) for wrist cameras.
@@ -145,6 +155,32 @@ class Environment:
 
         # define environment
         self.physicsClient = p.connect(p.GUI if self.vis else p.DIRECT)
+
+        # Optionally start PyBullet GUI without the left-side debug panels.
+        # This matches the effect of pressing 'G' in the GUI.
+        if self.vis and bool(hide_gui_panels):
+            self.set_gui_panels_enabled(False)
+
+        # GUI renderer visuals (shadows are enabled by default in PyBullet).
+        if self.vis:
+            try:
+                p.configureDebugVisualizer(p.COV_ENABLE_SHADOWS, 1 if bool(enable_shadows) else 0)
+            except Exception:
+                pass
+
+        # Renderer used for getCameraImage(). If this ends up slow (hundreds of ms),
+        # you're likely running without hardware-accelerated OpenGL.
+        if self.vis:
+            self.camera_renderer = getattr(p, "ER_BULLET_HARDWARE_OPENGL", None)
+        else:
+            self.camera_renderer = getattr(p, "ER_TINY_RENDERER", None)
+
+        # Default renderer for the external camera wrapper (used heavily by simulation.py).
+        # Falls back silently if the passed camera doesn't support this attribute.
+        try:
+            self.camera.default_renderer = self.camera_renderer
+        except Exception:
+            pass
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setTimeStep(1.0 / 240.0)
         p.setPhysicsEngineParameter(numSolverIterations=200)
@@ -211,8 +247,8 @@ class Environment:
         # -----------------------------
         # Load from an absolute path to make relative mesh paths reliable.
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        # dual_urdf_path = os.path.join(repo_root, "environment", "urdf", "dual_arm_robot.urdf")
-        dual_urdf_path = os.path.join(repo_root, "environment", "urdf", "full_stationary_robot.urdf")
+        # dual_urdf_path = os.path.join(repo_root, "environment", "urdf", "dual_arm_robot_without_wrist_cameras.urdf.urdf")
+        dual_urdf_path = os.path.join(repo_root, "environment", "urdf", "dual_arm_robot_with_wrist_cameras.urdf.urdf")
 
         self.robot_id = p.loadURDF(
             dual_urdf_path,
@@ -291,6 +327,10 @@ class Environment:
                 if self._head_camera_link_name.endswith("_optical_frame")
                 else (0.0, 0.0, 1.0),
             )
+            try:
+                self.head_camera.default_renderer = self.camera_renderer
+            except Exception:
+                pass
 
         self.left_arm_camera = None
         if self._left_arm_camera_link_name is not None:
@@ -312,6 +352,10 @@ class Environment:
                 up_axis=l_up,
                 eye_offset=0.05,
             )
+            try:
+                self.left_arm_camera.default_renderer = self.camera_renderer
+            except Exception:
+                pass
 
         self.right_arm_camera = None
         if self._right_arm_camera_link_name is not None:
@@ -331,6 +375,10 @@ class Environment:
                 up_axis=r_up,
                 eye_offset=0.05,
             )
+            try:
+                self.right_arm_camera.default_renderer = self.camera_renderer
+            except Exception:
+                pass
 
             # Wrist camera aiming parameters (used by get_left/right_arm_cam_img).
             # These are in meters in world space.
@@ -338,7 +386,7 @@ class Environment:
             # Tilt-down angle (degrees). Positive = tilt down.
             # Internally converted to a camera-local Y offset using:
             #   y = -tan(deg) * z
-            self.wrist_cam_tilt_down = 90.0
+            self.wrist_cam_tilt_down = 0.0
 
             # Optional per-axis aiming offsets in the camera's local frame (meters).
             # Camera local axes (for these parameters):
@@ -471,15 +519,46 @@ class Environment:
                                   (0.785, 1.4))
         self.reset_robot()
 
-    def get_head_cam_img(self):
+    def set_gui_panels_enabled(self, enabled: bool = True):
+        """Show/hide the PyBullet GUI side panels.
+
+        When hidden, this behaves like pressing 'G' in the GUI. We also hide the
+        RGB/depth/segmentation preview widgets so the left panel stays clean.
+        """
+        if not getattr(self, "vis", False):
+            return
+
+        enabled_i = 1 if bool(enabled) else 0
+        for flag_name in (
+            "COV_ENABLE_GUI",
+            "COV_ENABLE_RGB_BUFFER_PREVIEW",
+            "COV_ENABLE_DEPTH_BUFFER_PREVIEW",
+            "COV_ENABLE_SEGMENTATION_MARK_PREVIEW",
+        ):
+            flag = getattr(p, flag_name, None)
+            if flag is None:
+                continue
+            try:
+                p.configureDebugVisualizer(flag, enabled_i)
+            except Exception:
+                pass
+
+    def get_head_cam_img(self, return_depth: bool = True, return_seg: bool = True, renderer=None):
         """Return (rgb, depth, seg) from the head-mounted Kinect camera."""
         if self.head_camera is None or self._head_camera_link_name is None:
             raise RuntimeError("Head camera link not present in the loaded URDF")
         link_index = self.link_name_to_id[self._head_camera_link_name]
         # Match the external camera's look-at target.
-        return self.head_camera.get_cam_img(self.robot_id, link_index, target_world=self._external_cam_target)
+        return self.head_camera.get_cam_img(
+            self.robot_id,
+            link_index,
+            target_world=self._external_cam_target,
+            return_depth=bool(return_depth),
+            return_seg=bool(return_seg),
+            renderer=self.camera_renderer if renderer is None else renderer,
+        )
 
-    def get_left_arm_cam_img(self):
+    def get_left_arm_cam_img(self, return_depth: bool = True, return_seg: bool = True, renderer=None):
         """Return (rgb, depth, seg) from the left wrist RGB camera."""
         if self.left_arm_camera is None or self._left_arm_camera_link_name is None:
             raise RuntimeError("Left arm camera link not present in the loaded URDF")
@@ -571,9 +650,16 @@ class Environment:
             )
             if float(np.linalg.norm(dv)) > 1e-6:
                 target = fingertip
-        return self.left_arm_camera.get_cam_img(self.robot_id, link_index, target_world=target)
+        return self.left_arm_camera.get_cam_img(
+            self.robot_id,
+            link_index,
+            target_world=target,
+            return_depth=bool(return_depth),
+            return_seg=bool(return_seg),
+            renderer=self.camera_renderer if renderer is None else renderer,
+        )
 
-    def get_right_arm_cam_img(self):
+    def get_right_arm_cam_img(self, return_depth: bool = True, return_seg: bool = True, renderer=None):
         """Return (rgb, depth, seg) from the right wrist RGB camera."""
         if self.right_arm_camera is None or self._right_arm_camera_link_name is None:
             raise RuntimeError("Right arm camera link not present in the loaded URDF")
@@ -633,6 +719,7 @@ class Environment:
         oz = float(self.wrist_cam_look_ahead) if self.wrist_cam_look_ahead_z is None else float(self.wrist_cam_look_ahead_z)
         if self.wrist_cam_look_ahead_y is None:
             tilt_deg = float(self.wrist_cam_tilt_down)
+            print (f"Right wrist cam tilt (deg): {tilt_deg}, offset (m): {oz}, computed Y offset (m): {-math.tan(math.radians(tilt_deg)) * oz}")
             oy = -math.tan(math.radians(tilt_deg)) * oz
         else:
             oy = float(self.wrist_cam_look_ahead_y)
@@ -644,6 +731,7 @@ class Environment:
         )
 
         fingertip = self._get_fingertip_marker("right", tool_pos)
+        # fingertip[2] -= self.wrist_cam_look_ahead # Add a bit of height to the fingertip target to reduce collisions with the table.
         if fingertip is not None:
             dv = np.array(
                 [
@@ -655,7 +743,14 @@ class Environment:
             )
             if float(np.linalg.norm(dv)) > 1e-6:
                 target = fingertip
-        return self.right_arm_camera.get_cam_img(self.robot_id, link_index, target_world=target)
+        return self.right_arm_camera.get_cam_img(
+            self.robot_id,
+            link_index,
+            target_world=target,
+            return_depth=bool(return_depth),
+            return_seg=bool(return_seg),
+            renderer=self.camera_renderer if renderer is None else renderer,
+        )
 
     def visualize_cameras(
         self,
@@ -663,6 +758,7 @@ class Environment:
         show_depth: bool = False,
         window_name: str = "cameras",
         wait_ms: int = 1,
+        renderer=None,
     ) -> bool:
         """Visualize camera streams live in an OpenCV window.
 
@@ -678,6 +774,7 @@ class Environment:
             return False
 
         which_set = set(str(s).lower() for s in which)
+        effective_renderer = self.camera_renderer if renderer is None else renderer
 
         def _as_uint8_rgb(img):
             arr = np.asarray(img)
@@ -700,33 +797,53 @@ class Environment:
 
         try:
             if "external" in which_set:
-                rgb, depth, _seg = self.camera.get_cam_img()
+                rgb, depth, _seg = self.camera.get_cam_img(
+                    return_depth=bool(show_depth),
+                    return_seg=False,
+                    renderer=effective_renderer,
+                )
                 rgb_frames["external"] = _as_uint8_rgb(rgb)
-                depth_frames["external"] = np.asarray(depth)
+                if depth is not None:
+                    depth_frames["external"] = np.asarray(depth)
         except Exception:
             pass
 
         try:
             if "head" in which_set and self.head_camera is not None:
-                rgb, depth, _seg = self.get_head_cam_img()
+                rgb, depth, _seg = self.get_head_cam_img(
+                    return_depth=bool(show_depth),
+                    return_seg=False,
+                    renderer=effective_renderer,
+                )
                 rgb_frames["head"] = _as_uint8_rgb(rgb)
-                depth_frames["head"] = np.asarray(depth)
+                if depth is not None:
+                    depth_frames["head"] = np.asarray(depth)
         except Exception:
             pass
 
         try:
             if "left" in which_set and self.left_arm_camera is not None:
-                rgb, depth, _seg = self.get_left_arm_cam_img()
+                rgb, depth, _seg = self.get_left_arm_cam_img(
+                    return_depth=bool(show_depth),
+                    return_seg=False,
+                    renderer=effective_renderer,
+                )
                 rgb_frames["left"] = _as_uint8_rgb(rgb)
-                depth_frames["left"] = np.asarray(depth)
+                if depth is not None:
+                    depth_frames["left"] = np.asarray(depth)
         except Exception:
             pass
 
         try:
             if "right" in which_set and self.right_arm_camera is not None:
-                rgb, depth, _seg = self.get_right_arm_cam_img()
+                rgb, depth, _seg = self.get_right_arm_cam_img(
+                    return_depth=bool(show_depth),
+                    return_seg=False,
+                    renderer=effective_renderer,
+                )
                 rgb_frames["right"] = _as_uint8_rgb(rgb)
-                depth_frames["right"] = np.asarray(depth)
+                if depth is not None:
+                    depth_frames["right"] = np.asarray(depth)
         except Exception:
             pass
 
@@ -788,7 +905,8 @@ class Environment:
         pause_s: float = 0.001,
         max_fps: float | None = None,
         use_blit: bool = True,
-        visible: bool = False,
+        visible: bool = True,
+        renderer=None,
     ) -> bool:
         """Visualize camera streams live using Matplotlib.
 
@@ -799,20 +917,10 @@ class Environment:
             True to continue, False if visualization is unavailable.
         """
 
-        # TODO: Matplotlib can be very slow at rendering, especially with multiple subplots.
-        # This can be because of merging images into a single mosaic (fewer artists) and/or using blitting (only redraw changed artists). 
-        # and also writing caption to the images. 
-        # We can find a way to accelerate this. 
-        if not visible :
-            return 
-        # try:
-        #     import matplotlib
-        #     import matplotlib.pyplot as plt
-        # except Exception:
-        #     return False
+        if not bool(visible):
+            return False
 
         # Optional FPS throttle (useful to reduce GUI overhead).
-        # Only applies once the viewer exists; otherwise we still create the window.
         viewer_existing = getattr(self, "_mpl_cam_viewer", None)
         if viewer_existing is not None and max_fps is not None:
             try:
@@ -823,171 +931,160 @@ class Environment:
                 now = float(time.time())
                 last = float(getattr(self, "_mpl_cam_last_draw_ts", 0.0))
                 min_dt = 1.0 / max_fps_f
-                # If the user closed the window, stop.
-                try:
-                    if not plt.fignum_exists(viewer_existing["fig"].number):
-                        self._mpl_cam_viewer = None
-                        return False
-                except Exception:
-                    pass
                 if (now - last) < min_dt:
-                    # Still let matplotlib process events.
+                    # Called from the physics loop; do NOT sleep here.
+                    # Just let the GUI backend process pending events (non-blocking).
                     try:
-                        plt.pause(float(pause_s))
+                        fig = viewer_existing.get("fig")
+                        if fig is not None:
+                            fig.canvas.flush_events()
                     except Exception:
                         pass
                     return True
                 self._mpl_cam_last_draw_ts = now
 
         which_set = set(str(s).lower() for s in which)
+        effective_renderer = self.camera_renderer if renderer is None else renderer
 
-        def _as_float_or_u8_rgb(img):
+        def _as_u8_rgb(img) -> np.ndarray:
             arr = np.asarray(img)
-            if arr.dtype == np.uint8:
-                return arr
-            # PyBullet sometimes returns uint8 already; otherwise normalize/clamp.
-            return np.clip(arr, 0, 255).astype(np.uint8)
+            if arr.dtype != np.uint8:
+                arr = np.clip(arr, 0, 255).astype(np.uint8)
+            if arr.ndim == 2:
+                arr = np.repeat(arr[:, :, None], 3, axis=2)
+            return arr
 
-        # Capture frames
-        rgb_frames = {}
-        depth_frames = {}
+        rgb_frames: dict[str, np.ndarray] = {}
+        depth_frames: dict[str, np.ndarray] = {}
 
-        if "external" in which_set:
-            rgb, depth, _seg = self.camera.get_cam_img()
-            rgb_frames["external"] = _as_float_or_u8_rgb(rgb)
-            depth_frames["external"] = np.asarray(depth)
+        try:
+            if "external" in which_set:
+                rgb, depth, _seg = self.camera.get_cam_img(
+                    return_depth=bool(show_depth),
+                    return_seg=False,
+                    renderer=effective_renderer,
+                )
+                rgb_frames["external"] = _as_u8_rgb(rgb)
+                if depth is not None:
+                    depth_frames["external"] = np.asarray(depth)
+        except Exception:
+            pass
 
-        if "head" in which_set and self.head_camera is not None:
-            rgb, depth, _seg = self.get_head_cam_img()
-            rgb_frames["head"] = _as_float_or_u8_rgb(rgb)
-            depth_frames["head"] = np.asarray(depth)
+        try:
+            if "head" in which_set and self.head_camera is not None:
+                rgb, depth, _seg = self.get_head_cam_img(
+                    return_depth=bool(show_depth),
+                    return_seg=False,
+                    renderer=effective_renderer,
+                )
+                rgb_frames["head"] = _as_u8_rgb(rgb)
+                if depth is not None:
+                    depth_frames["head"] = np.asarray(depth)
+        except Exception:
+            pass
 
-        if "left" in which_set and self.left_arm_camera is not None:
-            rgb, depth, _seg = self.get_left_arm_cam_img()
-            rgb_frames["left"] = _as_float_or_u8_rgb(rgb)
-            depth_frames["left"] = np.asarray(depth)
+        try:
+            if "left" in which_set and self.left_arm_camera is not None:
+                rgb, depth, _seg = self.get_left_arm_cam_img(
+                    return_depth=bool(show_depth),
+                    return_seg=False,
+                    renderer=effective_renderer,
+                )
+                rgb_frames["left"] = _as_u8_rgb(rgb)
+                if depth is not None:
+                    depth_frames["left"] = np.asarray(depth)
+        except Exception:
+            pass
 
-        if "right" in which_set and self.right_arm_camera is not None:
-            rgb, depth, _seg = self.get_right_arm_cam_img()
-            rgb_frames["right"] = _as_float_or_u8_rgb(rgb)
-            depth_frames["right"] = np.asarray(depth)
-
-        if not getattr(self, "_mpl_cam_keys_printed", False):
-            self._mpl_cam_keys_printed = True
-            print(
-                "[viewer] Camera frames available:",
-                sorted(rgb_frames.keys()),
-                "| left_link=", getattr(self, "_left_arm_camera_link_name", None),
-                "right_link=", getattr(self, "_right_arm_camera_link_name", None),
-            )
+        try:
+            if "right" in which_set and self.right_arm_camera is not None:
+                rgb, depth, _seg = self.get_right_arm_cam_img(
+                    return_depth=bool(show_depth),
+                    return_seg=False,
+                    renderer=effective_renderer,
+                )
+                rgb_frames["right"] = _as_u8_rgb(rgb)
+                if depth is not None:
+                    depth_frames["right"] = np.asarray(depth)
+        except Exception:
+            pass
 
         if not rgb_frames:
             return False
 
-        def _make_mosaic(rgb_frames_local: dict[str, np.ndarray]) -> np.ndarray:
-            any_rgb = next(iter(rgb_frames_local.values()))
-            h, w = int(any_rgb.shape[0]), int(any_rgb.shape[1])
+        # Determine a consistent tile size.
+        any_rgb = next(iter(rgb_frames.values()))
+        h, w = int(any_rgb.shape[0]), int(any_rgb.shape[1])
+        blank_rgb = np.zeros((h, w, 3), dtype=np.uint8)
+        blank_depth = np.zeros((h, w), dtype=np.float32)
 
-            def _tile(name: str) -> np.ndarray:
-                img = rgb_frames_local.get(name)
-                if img is None:
-                    img = np.zeros((h, w, 3), dtype=np.uint8)
-                else:
-                    img = img.astype(np.uint8, copy=False)
-                return img
+        def _get_rgb(name: str) -> np.ndarray:
+            img = rgb_frames.get(name)
+            return blank_rgb if img is None else img
 
-            mosaic = np.vstack(
-                [
-                    np.hstack([_tile("external"), _tile("head")]),
-                    np.hstack([_tile("left"), _tile("right")]),
-                ]
-            )
-            return mosaic
+        def _get_depth_norm(name: str) -> np.ndarray:
+            d = depth_frames.get(name)
+            if d is None:
+                return blank_depth
+            d = np.asarray(d, dtype=np.float32)
+            d = np.nan_to_num(d, nan=0.0, posinf=0.0, neginf=0.0)
+            mn, mx = float(np.min(d)), float(np.max(d))
+            if mx - mn < 1e-6:
+                return blank_depth
+            return (d - mn) / (mx - mn)
 
-        def _make_depth_mosaic(depth_frames_local: dict[str, np.ndarray]) -> np.ndarray:
-            any_depth = next(iter(depth_frames_local.values()))
-            h, w = int(any_depth.shape[0]), int(any_depth.shape[1])
+        order = ("external", "head", "left", "right")
 
-            def _norm(d: np.ndarray) -> np.ndarray:
-                d = np.asarray(d, dtype=np.float32)
-                d = np.nan_to_num(d, nan=0.0, posinf=0.0, neginf=0.0)
-                # normalize per-tile to keep contrast useful
-                mn, mx = float(np.min(d)), float(np.max(d))
-                if mx - mn < 1e-6:
-                    return np.zeros((h, w), dtype=np.float32)
-                return (d - mn) / (mx - mn)
-
-            def _tile(name: str) -> np.ndarray:
-                d = depth_frames_local.get(name)
-                if d is None:
-                    d = np.zeros((h, w), dtype=np.float32)
-                return _norm(d)
-
-            return np.vstack(
-                [
-                    np.hstack([_tile("external"), _tile("head")]),
-                    np.hstack([_tile("left"), _tile("right")]),
-                ]
-            )
-
-        # Lazy-init persistent figure (single mosaic -> less crowded than 2x2 subplots).
         viewer = getattr(self, "_mpl_cam_viewer", None)
-        if viewer is not None and "im" not in viewer:
-            viewer = None
-            self._mpl_cam_viewer = None
-
-        if viewer is None:
+        if viewer is None or "fig" not in viewer:
             plt.ion()
-            fig = plt.figure(num=window_title)
-            fig.clf()
+            fig, axes = plt.subplots(2, 2, num=window_title)
             try:
                 fig.canvas.manager.set_window_title(window_title)
             except Exception:
                 pass
 
-            ax = fig.add_axes([0.0, 0.0, 1.0, 1.0])
-            ax.axis('off')
-            mosaic0 = _make_mosaic(rgb_frames)
-            im = ax.imshow(mosaic0)
-
-            # Small static labels (less clutter than subplot titles, and no per-frame overhead).
-            any_rgb = next(iter(rgb_frames.values()))
-            h, w = int(any_rgb.shape[0]), int(any_rgb.shape[1])
-            labels = [
-                ("external", (8, 14)),
-                ("head", (w + 8, 14)),
-                ("left", (8, h + 14)),
-                ("right", (w + 8, h + 14)),
-            ]
-            label_artists = []
-            for text, (x, y) in labels:
-                label_artists.append(ax.text(x, y, text, color='w', fontsize=10, va='top'))
+            ims = {}
+            for ax, name in zip(axes.ravel(), order):
+                ax.set_title(name)
+                ax.axis('off')
+                ims[name] = ax.imshow(_get_rgb(name), animated=bool(use_blit))
 
             depth_fig = None
-            depth_ax = None
-            depth_im = None
-            if show_depth:
-                depth_fig = plt.figure(num=f"{window_title}_depth")
-                depth_fig.clf()
+            depth_axes = None
+            depth_ims = None
+            if bool(show_depth):
+                depth_fig, depth_axes = plt.subplots(2, 2, num=f"{window_title}_depth")
                 try:
                     depth_fig.canvas.manager.set_window_title(f"{window_title}_depth")
                 except Exception:
                     pass
-                depth_ax = depth_fig.add_axes([0.0, 0.0, 1.0, 1.0])
-                depth_ax.axis('off')
-                depth0 = _make_depth_mosaic(depth_frames)
-                depth_im = depth_ax.imshow(depth0, cmap='turbo', vmin=0.0, vmax=1.0)
+                depth_ims = {}
+                for ax, name in zip(depth_axes.ravel(), order):
+                    ax.set_title(name)
+                    ax.axis('off')
+                    depth_ims[name] = ax.imshow(
+                        _get_depth_norm(name),
+                        cmap='turbo',
+                        vmin=0.0,
+                        vmax=1.0,
+                        animated=bool(use_blit),
+                    )
+
+            fig.tight_layout(pad=0.5)
+            if depth_fig is not None:
+                depth_fig.tight_layout(pad=0.5)
 
             self._mpl_cam_viewer = {
                 "fig": fig,
-                "ax": ax,
-                "im": im,
-                "labels": label_artists,
+                "axes": axes,
+                "ims": ims,
                 "depth_fig": depth_fig,
-                "depth_ax": depth_ax,
-                "depth_im": depth_im,
+                "depth_axes": depth_axes,
+                "depth_ims": depth_ims,
                 "use_blit": bool(use_blit),
                 "blit_bg": None,
+                "depth_blit_bg": None,
             }
             viewer = self._mpl_cam_viewer
 
@@ -999,98 +1096,229 @@ class Environment:
                     backend = "<unknown>"
                 print(f"[viewer] Opened Matplotlib camera window '{window_title}' (backend={backend}, DISPLAY={os.environ.get('DISPLAY')})")
 
-            # Explicitly show + flush events (helps on Qt backends).
             try:
-                # Some backends need an explicit show() to create the window.
                 plt.show(block=False)
-                fig.show()
+                # Prime the canvases so blitting has a valid background.
                 fig.canvas.draw()
                 fig.canvas.flush_events()
-
-                # Optional: faster updates via blitting.
-                if bool(use_blit):
-                    try:
-                        viewer["blit_bg"] = fig.canvas.copy_from_bbox(ax.bbox)
-
-                        def _on_resize(_evt):
-                            try:
-                                viewer["blit_bg"] = None
-                            except Exception:
-                                pass
-
-                        fig.canvas.mpl_connect("resize_event", _on_resize)
-                    except Exception:
-                        viewer["blit_bg"] = None
-                # Try to hide toolbar (Qt backend) to reduce visual clutter.
-                try:
-                    mgr = getattr(fig.canvas, "manager", None)
-                    tb = getattr(mgr, "toolbar", None) if mgr is not None else None
-                    if tb is not None and hasattr(tb, "setVisible"):
-                        tb.setVisible(False)
-                except Exception:
-                    pass
-                if show_depth and depth_fig is not None:
-                    plt.show(block=False)
-                    depth_fig.show()
+                if depth_fig is not None:
                     depth_fig.canvas.draw()
                     depth_fig.canvas.flush_events()
+
+                if bool(viewer.get("use_blit", False)):
                     try:
-                        mgr = getattr(depth_fig.canvas, "manager", None)
-                        tb = getattr(mgr, "toolbar", None) if mgr is not None else None
-                        if tb is not None and hasattr(tb, "setVisible"):
-                            tb.setVisible(False)
+                        viewer["blit_bg"] = fig.canvas.copy_from_bbox(fig.bbox)
+                    except Exception:
+                        viewer["blit_bg"] = None
+                    if depth_fig is not None:
+                        try:
+                            viewer["depth_blit_bg"] = depth_fig.canvas.copy_from_bbox(depth_fig.bbox)
+                        except Exception:
+                            viewer["depth_blit_bg"] = None
+
+                    def _on_resize(_evt):
+                        try:
+                            viewer["blit_bg"] = None
+                            viewer["depth_blit_bg"] = None
+                        except Exception:
+                            pass
+
+                    try:
+                        fig.canvas.mpl_connect("resize_event", _on_resize)
                     except Exception:
                         pass
-            except Exception as exc:
-                # Don't spam logs in the control loop.
-                if not getattr(self, "_mpl_cam_viewer_warned", False):
-                    self._mpl_cam_viewer_warned = True
-                    backend = None
-                    try:
-                        backend = matplotlib.get_backend()
-                    except Exception:
-                        backend = "<unknown>"
-                    print(f"[visualize_cameras_matplotlib] Failed to show window (backend={backend}): {exc}")
+                    if depth_fig is not None:
+                        try:
+                            depth_fig.canvas.mpl_connect("resize_event", _on_resize)
+                        except Exception:
+                            pass
+            except Exception:
                 self._mpl_cam_viewer = None
                 return False
 
         # If user closed the window, stop.
         try:
-            import matplotlib.pyplot as plt
             if not plt.fignum_exists(viewer["fig"].number):
                 self._mpl_cam_viewer = None
                 return False
         except Exception:
             pass
 
-        # Update images
-        viewer["im"].set_data(_make_mosaic(rgb_frames))
-        if show_depth and viewer.get("depth_fig") is not None and viewer.get("depth_im") is not None:
-            viewer["depth_im"].set_data(_make_depth_mosaic(depth_frames))
-
+        # Update RGB
         try:
             if bool(viewer.get("use_blit", False)):
                 fig = viewer["fig"]
-                ax = viewer["ax"]
                 bg = viewer.get("blit_bg")
                 if bg is None:
                     fig.canvas.draw()
-                    bg = fig.canvas.copy_from_bbox(ax.bbox)
-                    viewer["blit_bg"] = bg
-                fig.canvas.restore_region(bg)
-                ax.draw_artist(viewer["im"])
-                fig.canvas.blit(ax.bbox)
+                    try:
+                        bg = fig.canvas.copy_from_bbox(fig.bbox)
+                        viewer["blit_bg"] = bg
+                    except Exception:
+                        bg = None
+
+                if bg is not None:
+                    fig.canvas.restore_region(bg)
+
+                for name in order:
+                    im = viewer.get("ims", {}).get(name)
+                    if im is None:
+                        continue
+                    im.set_data(_get_rgb(name))
+                    try:
+                        im.axes.draw_artist(im)
+                    except Exception:
+                        pass
+
+                try:
+                    fig.canvas.blit(fig.bbox)
+                except Exception:
+                    fig.canvas.draw_idle()
                 fig.canvas.flush_events()
             else:
+                for name in order:
+                    if name in viewer.get("ims", {}):
+                        viewer["ims"][name].set_data(_get_rgb(name))
                 viewer["fig"].canvas.draw_idle()
                 viewer["fig"].canvas.flush_events()
-            if show_depth and viewer.get("depth_fig") is not None:
-                viewer["depth_fig"].canvas.draw_idle()
-                viewer["depth_fig"].canvas.flush_events()
-            plt.pause(float(pause_s))
-            return True
         except Exception:
             return False
+
+        # Update depth (optional)
+        if bool(show_depth) and viewer.get("depth_fig") is not None and viewer.get("depth_ims") is not None:
+            try:
+                depth_fig = viewer["depth_fig"]
+                if bool(viewer.get("use_blit", False)):
+                    bg = viewer.get("depth_blit_bg")
+                    if bg is None:
+                        depth_fig.canvas.draw()
+                        try:
+                            bg = depth_fig.canvas.copy_from_bbox(depth_fig.bbox)
+                            viewer["depth_blit_bg"] = bg
+                        except Exception:
+                            bg = None
+
+                    if bg is not None:
+                        depth_fig.canvas.restore_region(bg)
+
+                    for name in order:
+                        im = viewer.get("depth_ims", {}).get(name)
+                        if im is None:
+                            continue
+                        im.set_data(_get_depth_norm(name))
+                        try:
+                            im.axes.draw_artist(im)
+                        except Exception:
+                            pass
+
+                    try:
+                        depth_fig.canvas.blit(depth_fig.bbox)
+                    except Exception:
+                        depth_fig.canvas.draw_idle()
+                    depth_fig.canvas.flush_events()
+                else:
+                    for name in order:
+                        if name in viewer["depth_ims"]:
+                            viewer["depth_ims"][name].set_data(_get_depth_norm(name))
+                    depth_fig.canvas.draw_idle()
+                    depth_fig.canvas.flush_events()
+            except Exception:
+                pass
+
+        try:
+            ps = float(pause_s)
+            # pause_s==0 can freeze some backends; use an epsilon.
+            plt.pause(ps if ps > 0.0 else 1e-6)
+        except Exception:
+            pass
+        return True
+
+    def profile_camera_capture(
+        self,
+        which: Iterable[str] = ("external", "head", "left", "right"),
+        iters: int = 50,
+        renderer=None,
+    ):
+        """Profile camera capture time (no plotting).
+
+        Prints average milliseconds per frame for each enabled camera.
+        This helps distinguish capture cost (PyBullet getCameraImage) from plotting cost.
+        """
+        which_set = set(str(s).lower() for s in which)
+        iters_i = max(1, int(iters))
+
+        timers = {"external": 0.0, "head": 0.0, "left": 0.0, "right": 0.0}
+        counts = {k: 0 for k in timers}
+
+        def _t(fn, key: str):
+            t0 = time.perf_counter()
+            fn()
+            t1 = time.perf_counter()
+            timers[key] += (t1 - t0)
+            counts[key] += 1
+
+        for _ in range(iters_i):
+            if "external" in which_set:
+                try:
+                    _t(lambda: self.camera.get_cam_img(return_depth=True, return_seg=False, renderer=self.camera_renderer if renderer is None else renderer), "external")
+                except Exception:
+                    pass
+            if "head" in which_set and getattr(self, "head_camera", None) is not None:
+                try:
+                    _t(lambda: self.get_head_cam_img(return_depth=True, return_seg=False, renderer=renderer), "head")
+                except Exception:
+                    pass
+            if "left" in which_set and getattr(self, "left_arm_camera", None) is not None:
+                try:
+                    _t(lambda: self.get_left_arm_cam_img(return_depth=True, return_seg=False, renderer=renderer), "left")
+                except Exception:
+                    pass
+            if "right" in which_set and getattr(self, "right_arm_camera", None) is not None:
+                try:
+                    _t(lambda: self.get_right_arm_cam_img(return_depth=True, return_seg=False, renderer=renderer), "right")
+                except Exception:
+                    pass
+
+        print("[profile] camera capture avg ms/frame:")
+        for k in ("external", "head", "left", "right"):
+            if counts[k] == 0:
+                continue
+            ms = 1000.0 * timers[k] / float(counts[k])
+            print(f"  - {k}: {ms:.3f} ms")
+
+    def profile_matplotlib_update(self, which: Iterable[str] = ("external", "head", "left", "right"), iters: int = 50):
+        """Profile the full visualize_cameras_matplotlib() call (capture + draw)."""
+        iters_i = max(1, int(iters))
+        t_total = 0.0
+        ok_count = 0
+        for _ in range(iters_i):
+            t0 = time.perf_counter()
+            ok = False
+            try:
+                ok = bool(
+                    self.visualize_cameras_matplotlib(
+                        which=which,
+                        show_depth=False,
+                        window_title="cameras",
+                        pause_s=0.0,
+                        max_fps=None,
+                        use_blit=True,
+                        visible=True,
+                    )
+                )
+            except Exception:
+                ok = False
+            t1 = time.perf_counter()
+            if ok:
+                t_total += (t1 - t0)
+                ok_count += 1
+
+        if ok_count <= 0:
+            print("[profile] matplotlib viewer update failed")
+            return
+
+        ms = 1000.0 * t_total / float(ok_count)
+        print(f"[profile] visualize_cameras_matplotlib avg ms/call: {ms:.3f} ms (n={ok_count})")
 
     def _get_arm(self, arm: str | None):
         arm = self.active_arm if arm is None else arm
@@ -1134,6 +1362,11 @@ class Environment:
         """
         Hook p.stepSimulation()
         """
+        # try:
+        #     self._refresh_rendering()
+        # except Exception:
+        #     pass
+
         p.stepSimulation()
         if self.vis:
             # Update camera frame axis visualization (wrist-mounted cameras).
@@ -1155,6 +1388,7 @@ class Environment:
             # does not explicitly call visualize_cameras_matplotlib() every loop).
             if getattr(self, "auto_stream_cameras", False):
                 try:
+                    # print("[auto_stream_cameras] Streaming camera views...")
                     self.visualize_cameras_matplotlib(
                         which=getattr(self, "auto_stream_cameras_which", ("external", "head", "left", "right")),
                         show_depth=bool(getattr(self, "auto_stream_cameras_show_depth", False)),
@@ -1202,8 +1436,8 @@ class Environment:
         enabled: bool = True,
         which: Iterable[str] = ("external", "head", "left", "right"),
         show_depth: bool = False,
-        max_fps: float = 10.0,
-        pause_s: float = 0.001,
+        max_fps: float = 5.0,
+        pause_s: float = 0.0,
         use_blit: bool = True,
     ):
         """Enable/disable auto camera streaming driven by step_simulation()."""

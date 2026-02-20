@@ -1,0 +1,19 @@
+Total:
+Grasp acc=0.853 (151/177) --- Manipulation acc=0.819 (145/177) 
+
+Accuracy per object:
+Banana: Grasp acc=1.000 (10/10) --- Manipulation acc=1.000 (10/10) 
+ChipsCan: Grasp acc=1.000 (10/10) --- Manipulation acc=1.000 (10/10) 
+CrackerBox: Grasp acc=0.769 (10/13) --- Manipulation acc=0.692 (9/13) 
+GelatinBox: Grasp acc=1.000 (10/10) --- Manipulation acc=1.000 (10/10) 
+Hammer: Grasp acc=1.000 (10/10) --- Manipulation acc=1.000 (10/10) 
+MasterChefCan: Grasp acc=0.733 (11/15) --- Manipulation acc=0.667 (10/15) 
+MediumClamp: Grasp acc=0.667 (10/15) --- Manipulation acc=0.667 (10/15) 
+MustardBottle: Grasp acc=0.562 (9/16) --- Manipulation acc=0.500 (8/16) 
+Pear: Grasp acc=1.000 (11/11) --- Manipulation acc=0.909 (10/11) 
+PottedMeatCan: Grasp acc=1.000 (10/10) --- Manipulation acc=1.000 (10/10) 
+PowerDrill: Grasp acc=1.000 (10/10) --- Manipulation acc=1.000 (10/10) 
+Scissors: Grasp acc=0.643 (9/14) --- Manipulation acc=0.643 (9/14) 
+Strawberry: Grasp acc=0.909 (10/11) --- Manipulation acc=0.818 (9/11) 
+TennisBall: Grasp acc=1.000 (10/10) --- Manipulation acc=1.000 (10/10) 
+TomatoSoupCan: Grasp acc=0.917 (11/12) --- Manipulation acc=0.833 (10/12) 
