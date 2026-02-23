@@ -1,4 +1,5 @@
-from environment.utilities import setup_sisbot, setup_dual_arm_sisbot, Camera, LinkCamera
+from environment.utilities import setup_sisbot, setup_dual_arm_sisbot
+from environment.camera import Camera, LinkCamera
 import math
 import time
 import numpy as np
@@ -543,7 +544,23 @@ class Environment:
             except Exception:
                 pass
 
-    def get_head_cam_img(self, return_depth: bool = True, return_seg: bool = True, renderer=None):
+    def get_external_cam_img(
+        self,
+        return_depth: bool = True,
+        return_seg: bool = False,
+        renderer=p.ER_BULLET_HARDWARE_OPENGL,
+    ):
+        """Return (rgb, depth, seg) from the external fixed RGB-D camera."""
+        if getattr(self, "camera", None) is None:
+            raise RuntimeError("External camera is not configured")
+        effective_renderer = self.camera_renderer if renderer is None else renderer
+        return self.camera.get_cam_img(
+            return_depth=bool(return_depth),
+            return_seg=bool(return_seg),
+            renderer=effective_renderer,
+        )
+
+    def get_head_cam_img(self, return_depth: bool = True, return_seg: bool = True, renderer=p.ER_BULLET_HARDWARE_OPENGL):
         """Return (rgb, depth, seg) from the head-mounted Kinect camera."""
         if self.head_camera is None or self._head_camera_link_name is None:
             raise RuntimeError("Head camera link not present in the loaded URDF")
@@ -558,7 +575,7 @@ class Environment:
             renderer=self.camera_renderer if renderer is None else renderer,
         )
 
-    def get_left_arm_cam_img(self, return_depth: bool = True, return_seg: bool = True, renderer=None):
+    def get_left_arm_cam_img(self, return_depth: bool = True, return_seg: bool = True, renderer=p.ER_BULLET_HARDWARE_OPENGL):
         """Return (rgb, depth, seg) from the left wrist RGB camera."""
         if self.left_arm_camera is None or self._left_arm_camera_link_name is None:
             raise RuntimeError("Left arm camera link not present in the loaded URDF")
@@ -659,7 +676,7 @@ class Environment:
             renderer=self.camera_renderer if renderer is None else renderer,
         )
 
-    def get_right_arm_cam_img(self, return_depth: bool = True, return_seg: bool = True, renderer=None):
+    def get_right_arm_cam_img(self, return_depth: bool = True, return_seg: bool = True, renderer=p.ER_BULLET_HARDWARE_OPENGL):
         """Return (rgb, depth, seg) from the right wrist RGB camera."""
         if self.right_arm_camera is None or self._right_arm_camera_link_name is None:
             raise RuntimeError("Right arm camera link not present in the loaded URDF")
@@ -719,7 +736,7 @@ class Environment:
         oz = float(self.wrist_cam_look_ahead) if self.wrist_cam_look_ahead_z is None else float(self.wrist_cam_look_ahead_z)
         if self.wrist_cam_look_ahead_y is None:
             tilt_deg = float(self.wrist_cam_tilt_down)
-            print (f"Right wrist cam tilt (deg): {tilt_deg}, offset (m): {oz}, computed Y offset (m): {-math.tan(math.radians(tilt_deg)) * oz}")
+            # print (f"Right wrist cam tilt (deg): {tilt_deg}, offset (m): {oz}, computed Y offset (m): {-math.tan(math.radians(tilt_deg)) * oz}")
             oy = -math.tan(math.radians(tilt_deg)) * oz
         else:
             oy = float(self.wrist_cam_look_ahead_y)
@@ -797,7 +814,7 @@ class Environment:
 
         try:
             if "external" in which_set:
-                rgb, depth, _seg = self.camera.get_cam_img(
+                rgb, depth, _seg = self.get_external_cam_img(
                     return_depth=bool(show_depth),
                     return_seg=False,
                     renderer=effective_renderer,
@@ -921,7 +938,7 @@ class Environment:
             return False
 
         # Optional FPS throttle (useful to reduce GUI overhead).
-        viewer_existing = getattr(self, "_mpl_cam_viewer", None)
+        viewer_existing = getattr(self, "_cam_viewer", None)
         if viewer_existing is not None and max_fps is not None:
             try:
                 max_fps_f = float(max_fps)
@@ -929,7 +946,7 @@ class Environment:
                 max_fps_f = 0.0
             if max_fps_f > 0.0:
                 now = float(time.time())
-                last = float(getattr(self, "_mpl_cam_last_draw_ts", 0.0))
+                last = float(getattr(self, "_cam_last_draw_ts", 0.0))
                 min_dt = 1.0 / max_fps_f
                 if (now - last) < min_dt:
                     # Called from the physics loop; do NOT sleep here.
@@ -941,7 +958,7 @@ class Environment:
                     except Exception:
                         pass
                     return True
-                self._mpl_cam_last_draw_ts = now
+                self._cam_last_draw_ts = now
 
         which_set = set(str(s).lower() for s in which)
         effective_renderer = self.camera_renderer if renderer is None else renderer
@@ -959,7 +976,7 @@ class Environment:
 
         try:
             if "external" in which_set:
-                rgb, depth, _seg = self.camera.get_cam_img(
+                rgb, depth, _seg = self.get_external_cam_img(
                     return_depth=bool(show_depth),
                     return_seg=False,
                     renderer=effective_renderer,
@@ -1035,7 +1052,7 @@ class Environment:
 
         order = ("external", "head", "left", "right")
 
-        viewer = getattr(self, "_mpl_cam_viewer", None)
+        viewer = getattr(self, "_cam_viewer", None)
         if viewer is None or "fig" not in viewer:
             plt.ion()
             fig, axes = plt.subplots(2, 2, num=window_title)
@@ -1075,7 +1092,7 @@ class Environment:
             if depth_fig is not None:
                 depth_fig.tight_layout(pad=0.5)
 
-            self._mpl_cam_viewer = {
+            self._cam_viewer = {
                 "fig": fig,
                 "axes": axes,
                 "ims": ims,
@@ -1086,10 +1103,10 @@ class Environment:
                 "blit_bg": None,
                 "depth_blit_bg": None,
             }
-            viewer = self._mpl_cam_viewer
+            viewer = self._cam_viewer
 
-            if not getattr(self, "_mpl_cam_viewer_opened", False):
-                self._mpl_cam_viewer_opened = True
+            if not getattr(self, "_cam_viewer_opened", False):
+                self._cam_viewer_opened = True
                 try:
                     backend = matplotlib.get_backend()
                 except Exception:
@@ -1133,13 +1150,13 @@ class Environment:
                         except Exception:
                             pass
             except Exception:
-                self._mpl_cam_viewer = None
+                self._cam_viewer = None
                 return False
 
         # If user closed the window, stop.
         try:
             if not plt.fignum_exists(viewer["fig"].number):
-                self._mpl_cam_viewer = None
+                self._cam_viewer = None
                 return False
         except Exception:
             pass
@@ -1260,7 +1277,14 @@ class Environment:
         for _ in range(iters_i):
             if "external" in which_set:
                 try:
-                    _t(lambda: self.camera.get_cam_img(return_depth=True, return_seg=False, renderer=self.camera_renderer if renderer is None else renderer), "external")
+                    _t(
+                        lambda: self.get_external_cam_img(
+                            return_depth=True,
+                            return_seg=False,
+                            renderer=renderer,
+                        ),
+                        "external",
+                    )
                 except Exception:
                     pass
             if "head" in which_set and getattr(self, "head_camera", None) is not None:
@@ -1386,7 +1410,8 @@ class Environment:
 
             # Optional camera stream driven by stepping (useful when the caller
             # does not explicitly call visualize_cameras_matplotlib() every loop).
-            if getattr(self, "auto_stream_cameras", False):
+            # if getattr(self, "auto_stream_cameras", True):
+            if (self.auto_stream_cameras):
                 try:
                     # print("[auto_stream_cameras] Streaming camera views...")
                     self.visualize_cameras_matplotlib(
