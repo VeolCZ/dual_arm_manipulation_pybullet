@@ -7,10 +7,8 @@ import pybullet as p
 import pybullet_data
 import random
 import os
-from typing import Iterable
+from typing import Iterable, Optional, Sequence
 import time
-import matplotlib
-import matplotlib.pyplot as plt
 
 class FailToReachTargetError(RuntimeError):
     pass
@@ -119,6 +117,23 @@ class Environment:
         self.vis = vis
         self.debug = debug
         self.camera = camera
+
+        # EE pose visualization using a mesh marker (optional GUI helper).
+        # When enabled, we attach a visual-only mesh to left_tool0/right_tool0 via
+        # a fixed constraint so it follows the current EE pose continuously.
+        self._eef_mesh_debug_enabled = False
+        self._eef_mesh_debug_stl_path: Optional[str] = None
+        self._eef_mesh_debug_mesh_scale = 1.0
+        self._eef_mesh_debug_rgba = (1.0, 1.0, 1.0, 1.0)
+        self._eef_mesh_debug_parent_to_mesh_xyz = (0.0, 0.0, 0.0)
+        self._eef_mesh_debug_parent_to_mesh_quat_xyzw = (0.0, 0.0, 0.0, 1.0)
+        # Per-arm created bodies/constraints.
+        self._eef_mesh_debug_body_uid: dict[str, int] = {}
+        self._eef_mesh_debug_cid: dict[str, int] = {}
+
+        # Debug bodies that should be removed after a wall-clock timeout.
+        # Items are (bodyUniqueId, expiry_time_s).
+        self._debug_bodies_expiry: list[tuple[int, float]] = []
 
         # Optional: auto-update camera mosaic viewer on each simulation step.
         # Disabled by default to avoid adding GUI overhead to training runs.
@@ -937,6 +952,12 @@ class Environment:
         if not bool(visible):
             return False
 
+        try:
+            import matplotlib
+            import matplotlib.pyplot as plt
+        except Exception:
+            return False
+
         # Optional FPS throttle (useful to reduce GUI overhead).
         viewer_existing = getattr(self, "_cam_viewer", None)
         if viewer_existing is not None and max_fps is not None:
@@ -1393,6 +1414,31 @@ class Environment:
 
         p.stepSimulation()
         if self.vis:
+            # Clean up any expired debug bodies.
+            if getattr(self, "_debug_bodies_expiry", None):
+                try:
+                    now = time.time()
+                    keep: list[tuple[int, float]] = []
+                    for uid, t_exp in list(self._debug_bodies_expiry):
+                        if float(t_exp) <= now:
+                            try:
+                                p.removeBody(int(uid))
+                            except Exception:
+                                pass
+                        else:
+                            keep.append((int(uid), float(t_exp)))
+                    self._debug_bodies_expiry = keep
+                except Exception:
+                    pass
+
+            # Ensure EE mesh debug is created if enabled.
+            if getattr(self, "_eef_mesh_debug_enabled", False):
+                try:
+                    self._ensure_eef_mesh_debug()
+                except Exception:
+                    # Debug viz should never break the simulation.
+                    pass
+
             # Update camera frame axis visualization (wrist-mounted cameras).
             if getattr(self, "draw_camera_frame_debug", False):
                 try:
@@ -1425,6 +1471,188 @@ class Environment:
                 except Exception:
                     pass
             time.sleep(self.SIMULATION_STEP_DELAY)
+
+    def register_debug_body_expiry(self, body_uid: int, lifetime_s: float) -> None:
+        """Request that a visual-only debug body be removed after lifetime_s.
+
+        Note: removal is processed from step_simulation() and only when running
+        with GUI enabled (self.vis=True).
+        """
+        try:
+            uid = int(body_uid)
+            life = float(lifetime_s)
+        except Exception:
+            return
+        if uid < 0 or life <= 0.0:
+            return
+        try:
+            self._debug_bodies_expiry.append((uid, time.time() + life))
+        except Exception:
+            pass
+
+    def enable_eef_mesh_debug(
+        self,
+        enabled: bool = True,
+        *,
+        arms: Sequence[str] = ("left", "right"),
+        stl_path: Optional[str] = None,
+        mesh_scale: float = 1.0,
+        rgba: Sequence[float] = (1.0, 1.0, 1.0, 0.9),
+        parent_to_mesh_xyz: Sequence[float] = (0.0, 0.0, 0.0),
+        parent_to_mesh_quat_xyzw: Sequence[float] = (0.0, 0.0, 0.0, 1.0),
+        clear_existing: bool = True,
+    ):
+        """Enable/disable mesh visualization for the current EE pose.
+
+        This attaches a visual-only mesh to each tool0 link via a fixed constraint.
+
+        Args:
+            enabled: Toggle mesh visualization.
+            arms: Which arms to attach to (any of: "left", "right").
+            stl_path: STL mesh to use. Defaults to repo root
+                `full_hand_hamid_corrected_axes_tool0.stl`.
+            mesh_scale: Uniform mesh scale.
+            rgba: RGBA color (alpha < 1 is helpful for seeing through).
+            parent_to_mesh_xyz: Offset applied in the parent (tool0) frame.
+            parent_to_mesh_quat_xyzw: Orientation offset applied in the parent frame.
+            clear_existing: Remove any previously created debug mesh bodies.
+        """
+
+        enabled_b = bool(enabled)
+        if not enabled_b and clear_existing:
+            self._clear_eef_mesh_debug()
+
+        self._eef_mesh_debug_enabled = enabled_b
+        if not enabled_b:
+            return
+
+        if stl_path is None:
+            # Repo root is one level above the environment/ folder.
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            stl_path = os.path.join(repo_root, "full_hand_hamid_corrected_axes_tool0.stl")
+
+        self._eef_mesh_debug_stl_path = str(stl_path)
+        self._eef_mesh_debug_mesh_scale = float(mesh_scale)
+        self._eef_mesh_debug_rgba = (float(rgba[0]), float(rgba[1]), float(rgba[2]), float(rgba[3]))
+        self._eef_mesh_debug_parent_to_mesh_xyz = (
+            float(parent_to_mesh_xyz[0]),
+            float(parent_to_mesh_xyz[1]),
+            float(parent_to_mesh_xyz[2]),
+        )
+        self._eef_mesh_debug_parent_to_mesh_quat_xyzw = (
+            float(parent_to_mesh_quat_xyzw[0]),
+            float(parent_to_mesh_quat_xyzw[1]),
+            float(parent_to_mesh_quat_xyzw[2]),
+            float(parent_to_mesh_quat_xyzw[3]),
+        )
+        self._eef_mesh_debug_arms = tuple(str(a).lower() for a in arms)
+
+        if clear_existing:
+            self._clear_eef_mesh_debug()
+
+        # Create immediately if possible.
+        self._ensure_eef_mesh_debug()
+
+    def _clear_eef_mesh_debug(self):
+        # Remove constraints first.
+        for _arm, cid in list(getattr(self, "_eef_mesh_debug_cid", {}).items()):
+            try:
+                if int(cid) >= 0:
+                    p.removeConstraint(int(cid))
+            except Exception:
+                pass
+        try:
+            self._eef_mesh_debug_cid.clear()
+        except Exception:
+            self._eef_mesh_debug_cid = {}
+
+        for _arm, uid in list(getattr(self, "_eef_mesh_debug_body_uid", {}).items()):
+            try:
+                if int(uid) >= 0:
+                    p.removeBody(int(uid))
+            except Exception:
+                pass
+        try:
+            self._eef_mesh_debug_body_uid.clear()
+        except Exception:
+            self._eef_mesh_debug_body_uid = {}
+
+    def _ensure_eef_mesh_debug(self):
+        if not getattr(self, "_eef_mesh_debug_enabled", False):
+            return
+
+        if not hasattr(self, "robot_id") or self.robot_id is None:
+            return
+        if not hasattr(self, "link_name_to_id"):
+            return
+
+        stl_path = getattr(self, "_eef_mesh_debug_stl_path", None)
+        if not stl_path:
+            return
+
+        # Resolve tool0 link indices.
+        left_li = None
+        right_li = None
+        if "left_tool0" in self.link_name_to_id:
+            left_li = int(self.link_name_to_id["left_tool0"])
+        if "right_tool0" in self.link_name_to_id:
+            right_li = int(self.link_name_to_id["right_tool0"])
+
+        arm_to_li = {"left": left_li, "right": right_li}
+        arms = getattr(self, "_eef_mesh_debug_arms", ("left", "right"))
+
+        for arm in arms:
+            if arm not in ("left", "right"):
+                continue
+            if arm in self._eef_mesh_debug_body_uid:
+                continue
+            li = arm_to_li.get(arm)
+            if li is None:
+                continue
+
+            rgba = getattr(self, "_eef_mesh_debug_rgba", (1.0, 1.0, 1.0, 1.0))
+            mesh_scale = float(getattr(self, "_eef_mesh_debug_mesh_scale", 1.0))
+
+            vshape = p.createVisualShape(
+                shapeType=p.GEOM_MESH,
+                fileName=str(stl_path),
+                meshScale=[mesh_scale, mesh_scale, mesh_scale],
+                rgbaColor=[float(rgba[0]), float(rgba[1]), float(rgba[2]), float(rgba[3])],
+            )
+            # Spawn it at the current tool pose (it will be constrained after).
+            ls = p.getLinkState(self.robot_id, int(li), computeForwardKinematics=True)
+            tool_pos, tool_orn = (ls[4], ls[5]) if len(ls) >= 6 else (ls[0], ls[1])
+            uid = p.createMultiBody(
+                baseMass=0.0,
+                baseVisualShapeIndex=int(vshape),
+                baseCollisionShapeIndex=-1,
+                basePosition=[float(tool_pos[0]), float(tool_pos[1]), float(tool_pos[2])],
+                baseOrientation=[float(tool_orn[0]), float(tool_orn[1]), float(tool_orn[2]), float(tool_orn[3])],
+            )
+
+            parent_to_xyz = getattr(self, "_eef_mesh_debug_parent_to_mesh_xyz", (0.0, 0.0, 0.0))
+            parent_to_quat = getattr(self, "_eef_mesh_debug_parent_to_mesh_quat_xyzw", (0.0, 0.0, 0.0, 1.0))
+
+            cid = p.createConstraint(
+                parentBodyUniqueId=int(self.robot_id),
+                parentLinkIndex=int(li),
+                childBodyUniqueId=int(uid),
+                childLinkIndex=-1,
+                jointType=p.JOINT_FIXED,
+                jointAxis=[0, 0, 0],
+                parentFramePosition=[float(parent_to_xyz[0]), float(parent_to_xyz[1]), float(parent_to_xyz[2])],
+                childFramePosition=[0.0, 0.0, 0.0],
+                parentFrameOrientation=[
+                    float(parent_to_quat[0]),
+                    float(parent_to_quat[1]),
+                    float(parent_to_quat[2]),
+                    float(parent_to_quat[3]),
+                ],
+                childFrameOrientation=[0.0, 0.0, 0.0, 1.0],
+            )
+
+            self._eef_mesh_debug_body_uid[arm] = int(uid)
+            self._eef_mesh_debug_cid[arm] = int(cid)
 
     def enable_camera_frame_debug(self, enabled: bool = True, clear_existing: bool = True):
         """Enable/disable the wrist-camera debug axes + target rays.
@@ -1794,7 +2022,7 @@ class Environment:
                     1.5776737372027796, 4.726433026581564,
                     -1.496913258229391, -3.1232035795794886]
 
-        for _ in range(500):
+        for _ in range(1000):
             for i, name in enumerate(self.right_controlJoints):
                 joint = self.joints[name]
                 p.setJointMotorControl2(
@@ -2285,8 +2513,15 @@ class Environment:
         self.update_obj_states()
 
 
-    def move_ee(self, action, max_step=600, check_collision_config=None, custom_velocity=None,
-                try_close_gripper=False, verbose=False):
+    def move_ee(
+        self,
+        action,
+        max_step=600,
+        check_collision_config=None,
+        custom_velocity=None,
+        try_close_gripper=False,
+        verbose=False,
+    ):
         x, y, z, orn = action
         x = np.clip(x, *self.ee_position_limit[0])
         y = np.clip(y, *self.ee_position_limit[1])
@@ -2298,10 +2533,60 @@ class Environment:
         still_open_flag_ = True  # Hot fix
 
         eef_id, arm_joint_names, _ = self._get_arm(None)
+        t0 = float(time.time())
         real_xyz, real_xyzw = p.getLinkState(self.robot_id, eef_id)[0:2]
-        alpha = 0.2 # this parameter can be tuned to make the movement  smoother
+
+        # Precompute target orientation in Euler once (orn is constant for this call).
+        target_roll, target_pitch, target_yaw = p.getEulerFromQuaternion(orn)
+
+        # Dynamic step budget: if max_step is None (or <=0), estimate a reasonable
+        # cap based on initial distance, and still break early on convergence.
+        pos_tol = 0.005
+        # Orientation tolerance in radians (via quaternion angular distance).
+        orn_tol = 0.02
+        try:
+            d0 = float(np.linalg.norm(np.array((x, y, z)) - np.array(real_xyz)))
+        except Exception:
+            d0 = 0.0
+
+        if max_step is None:
+            max_step_i = 0
+        else:
+            try:
+                max_step_i = int(max_step)
+            except Exception:
+                max_step_i = 0
+
+        if max_step_i <= 0:
+            # Rough bound using a fixed alpha derived from initial distance.
+            # Remaining distance after n steps: ~ (1-alpha)^n * d0
+            alpha0 = float(np.clip(d0 * 0.5, 0.05, 0.2))
+            if d0 <= pos_tol:
+                est = 1
+            else:
+                try:
+                    est = int(np.ceil(np.log(pos_tol / max(d0, 1e-9)) / np.log(max(1.0 - alpha0, 1e-6))))
+                except Exception:
+                    est = 600
+            # Keep within a sane range. Minimum 200 helps avoid premature failure
+            # when dynamics/gains require extra settling.
+            max_step_i = int(np.clip(est, 200, 2000))
+
+        reached = False
         
-        for _ in range(max_step):
+        for _ in range(max_step_i):
+
+            # Smoothing: blend target toward current EE position.
+            # Larger distance -> larger alpha (faster), near target -> smaller alpha (smoother).
+            try:
+                distance = float(np.linalg.norm(np.array((x, y, z)) - np.array(real_xyz)))
+            except Exception:
+                distance = 0.0
+            # Use a larger alpha when far (faster approach), and snap to alpha=1.0
+            # when very close to avoid stalling with tiny incremental targets.
+            alpha = float(np.clip(distance * 0.5, 0.05, 0.5))
+            if distance < 0.02:
+                alpha = 1.0
 
             # apply IK
             x_tmp = alpha * x + (1-alpha)*real_xyz[0]
@@ -2310,7 +2595,7 @@ class Environment:
             
             joint_poses = p.calculateInverseKinematics(bodyUniqueId=self.robot_id, endEffectorLinkIndex=eef_id, 
                                                        targetPosition=[x_tmp, y_tmp, z_tmp], targetOrientation=orn, 
-                                                       maxNumIterations=200)
+                                                       maxNumIterations=50)
 
             # PyBullet IK returns values for all movable joints in the model.
             # Extract only the 6 arm joints for the active arm.
@@ -2319,6 +2604,13 @@ class Environment:
                 jid = self.joints[name].id
                 idx = self.joint_id_to_movable_index[jid]
                 arm_positions.append(joint_poses[idx])
+
+            # Ramp up position gain near target to reduce steady-state error.
+            pos_gain = float(self.ARM_POSITION_GAIN)
+            if distance < 0.05:
+                pos_gain = min(0.2, pos_gain * 4.0)
+            if distance < 0.02:
+                pos_gain = min(0.3, pos_gain * 6.0)
 
             for i, name in enumerate(arm_joint_names):
                 joint = self.joints[name]
@@ -2332,11 +2624,19 @@ class Environment:
                     maxVelocity=float(joint.maxVelocity)
                     if custom_velocity is None
                     else float(custom_velocity) * (i + 1),
-                    positionGain=self.ARM_POSITION_GAIN,
+                    positionGain=pos_gain,
                     velocityGain=self.ARM_VELOCITY_GAIN,
                 )
 
-            self.step_simulation()
+            # Let the arm settle toward the current IK target for a few physics steps.
+            # Near the target alpha is small -> use more substeps.
+            try:
+                substeps = int(np.clip(round(0.2 / max(alpha, 1e-6)), 1, 5))
+            except Exception:
+                substeps = 1
+            for _sub in range(substeps):
+                self.step_simulation()
+
             if try_close_gripper and still_open_flag_ and not self.gripper_contact():
                 still_open_flag_ = self.close_gripper(check_contact=True)
 
@@ -2348,18 +2648,44 @@ class Environment:
 
             # Check xyz and rpy error
             real_xyz, real_xyzw = p.getLinkState(self.robot_id, eef_id)[0:2]
-            roll, pitch, yaw = p.getEulerFromQuaternion(orn)
-            real_roll, real_pitch, real_yaw = p.getEulerFromQuaternion(real_xyzw)
-            if np.linalg.norm(np.array((x, y, z)) - real_xyz) < 0.001 \
-                    and np.abs((roll - real_roll, pitch - real_pitch, yaw - real_yaw)).sum() < 0.001:
+            pos_err = float(np.linalg.norm(np.array((x, y, z)) - np.array(real_xyz)))
+
+            # Quaternion angular distance (robust vs Euler wrap-around).
+            try:
+                q_real = np.array(real_xyzw, dtype=np.float64)
+                q_tgt = np.array(orn, dtype=np.float64)
+                dot = float(np.dot(q_real, q_tgt))
+                dot = float(np.clip(abs(dot), 0.0, 1.0))
+                orn_err = float(2.0 * math.acos(dot))
+            except Exception:
+                # Fallback to Euler diffs (less robust).
+                real_roll, real_pitch, real_yaw = p.getEulerFromQuaternion(real_xyzw)
+                orn_err = float(
+                    np.abs(
+                        np.array(
+                            [
+                                target_roll - real_roll,
+                                target_pitch - real_pitch,
+                                target_yaw - real_yaw,
+                            ]
+                        )
+                    ).sum()
+                )
+
+            if pos_err < pos_tol and orn_err < orn_tol:
+                reached = True
                 if verbose:
                     print('Reach target with', _, 'steps')
-                return True, (real_xyz, real_xyzw)
+                break
 
-        # raise FailToReachTargetError
-        if self.debug:
+        if verbose:
+            print(f"move_ee duration: {time.time()-t0:.3f}s")
+
+        if (not reached) and self.debug:
             print('Failed to reach the target')
-        return False, p.getLinkState(self.robot_id, eef_id)[0:2]
+
+        # Return the latest EE state regardless; caller can inspect error.
+        return bool(reached), (real_xyz, real_xyzw)
 
     def grasp(self, pos: tuple, yaw: float, gripper_opening_length: float, obj_height: float, debug: bool = False):
         """

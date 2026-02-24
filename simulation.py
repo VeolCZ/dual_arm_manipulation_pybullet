@@ -95,7 +95,7 @@ class GrasppingScenarios():
         return env
        
                 
-    def draw_predicted_grasp(self, grasps, color=(0, 0, 1), lineIDs=None):
+    def draw_predicted_top_down_grasp(self, grasps, color=(0, 0, 1), lineIDs=None):
         x, y, z, yaw, opening_len, obj_height = grasps
 
         if lineIDs is None:
@@ -119,7 +119,7 @@ class GrasppingScenarios():
         
         return lineIDs
 
-    def _maybe_visualize_cameras(
+    def _visualize_cameras(
         self,
         env: Environment,
         bgr,
@@ -281,7 +281,7 @@ class GrasppingScenarios():
                     if not self._scene_has_objects_from_depth(depth):
                         break
 
-                    viewer_warned = self._maybe_visualize_cameras(
+                    viewer_warned = self._visualize_cameras(
                         env,
                         bgr,
                         vis=vis,
@@ -315,13 +315,13 @@ class GrasppingScenarios():
                     if vis:
                         LID =[]
                         for g in grasps:
-                            LID = self.draw_predicted_grasp(g,color=[1,0,1],lineIDs=LID)
+                            LID = self.draw_predicted_top_down_grasp(g,color=[1,0,1],lineIDs=LID)
                         time.sleep(0.5)
                         self.remove_drawing(LID)
                         self.dummy_simulation_steps(10, env=env)
                         
 
-                    lineIDs = self.draw_predicted_grasp(grasps[idx])
+                    lineIDs = self.draw_predicted_top_down_grasp(grasps[idx])
 
                     x, y, z, yaw, opening_len, obj_height = grasps[idx]
                     succes_grasp, succes_target = env.grasp((x, y, z), yaw, opening_len, obj_height)
@@ -450,7 +450,7 @@ class GrasppingScenarios():
                             break
 
                         data.add_try()
-                        viewer_warned = self._maybe_visualize_cameras(
+                        viewer_warned = self._visualize_cameras(
                             env,
                             bgr,
                             vis=vis,
@@ -475,7 +475,7 @@ class GrasppingScenarios():
                         if vis:
                             LID =[]
                             for g in grasps:
-                                LID = self.draw_predicted_grasp(g,color=[1,0,1],lineIDs=LID)
+                                LID = self.draw_predicted_top_down_grasp(g,color=[1,0,1],lineIDs=LID)
                             time.sleep(0.5)
                             self.remove_drawing(LID)
                             self.dummy_simulation_steps(20, env=env)
@@ -489,7 +489,7 @@ class GrasppingScenarios():
                                 number_of_failures += 1
                                 continue  
 
-                        lineIDs = self.draw_predicted_grasp(grasps[idx])
+                        lineIDs = self.draw_predicted_top_down_grasp(grasps[idx])
                         
                         ## perform object grasping and manipulation : 
                         #### succes_grasp means if the grasp was successful, 
