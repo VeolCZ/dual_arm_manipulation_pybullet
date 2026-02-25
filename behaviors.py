@@ -475,13 +475,10 @@ class Behaviors:
                 pass
         self._ee_target_debug_ids[robot] = []
 
-        uid_mesh = int(self._ee_target_mesh_uid.get(robot, -1))
-        if uid_mesh >= 0:
-            try:
-                p.removeBody(uid_mesh)
-            except Exception:
-                pass
-        self._ee_target_mesh_uid[robot] = -1
+        # IMPORTANT: do not call removeBody() for debug markers.
+        # PyBullet can re-use body unique IDs; deleting a stale marker UID can
+        # occasionally delete a real object later.
+        # EE target mesh marker is persistent; no expiry bookkeeping needed.
 
     # ---------------------------------------------------------------------
     # Preset poses
@@ -912,26 +909,68 @@ class Behaviors:
                 rr, gg, bb = 0.0, 0.8, 0.0
             aa = float(alpha)
 
-        vshape = p.createVisualShape(
-            shapeType=p.GEOM_MESH,
-            fileName=str(stl_path),
-            meshScale=[float(mesh_scale), float(mesh_scale), float(mesh_scale)],
-            rgbaColor=[float(rr), float(gg), float(bb), float(aa)],
-        )
-        uid = p.createMultiBody(
-            baseMass=0.0,
-            baseVisualShapeIndex=int(vshape),
-            baseCollisionShapeIndex=-1,
-            basePosition=[float(position_xyz[0]), float(position_xyz[1]), float(position_xyz[2])],
-            baseOrientation=[float(orn[0]), float(orn[1]), float(orn[2]), float(orn[3])],
-        )
-        self._ee_target_mesh_uid[robot] = int(uid)
+        # Reuse a persistent, visual-only marker body to avoid removeBody() churn
+        # (and the associated UID-reuse hazards).
+        uid = int(self._ee_target_mesh_uid.get(robot, -1))
+        reuse_ok = False
+        if uid >= 0:
+            try:
+                # Body must still exist.
+                p.getBasePositionAndOrientation(int(uid))
+                exists = True
+            except Exception:
+                exists = False
+            if exists:
+                try:
+                    dyn = p.getDynamicsInfo(int(uid), -1)
+                    mass = float(dyn[0]) if dyn is not None and len(dyn) > 0 else 0.0
+                except Exception:
+                    mass = 0.0
+                try:
+                    cdata = p.getCollisionShapeData(int(uid), -1)
+                    has_collision = bool(cdata)
+                except Exception:
+                    has_collision = True
+                reuse_ok = (abs(mass) <= 1e-9) and (not has_collision)
 
-        # Best-effort: expire the body after duration_s (only processed in GUI mode).
-        try:
-            self.env.register_debug_body_expiry(int(uid), float(duration_s))
-        except Exception:
-            pass
+        if not reuse_ok:
+            uid = -1
+            self._ee_target_mesh_uid[robot] = -1
+
+        if uid < 0:
+            vshape = p.createVisualShape(
+                shapeType=p.GEOM_MESH,
+                fileName=str(stl_path),
+                meshScale=[float(mesh_scale), float(mesh_scale), float(mesh_scale)],
+                rgbaColor=[float(rr), float(gg), float(bb), float(aa)],
+            )
+            uid = p.createMultiBody(
+                baseMass=0.0,
+                baseVisualShapeIndex=int(vshape),
+                baseCollisionShapeIndex=-1,
+                basePosition=[float(position_xyz[0]), float(position_xyz[1]), float(position_xyz[2])],
+                baseOrientation=[float(orn[0]), float(orn[1]), float(orn[2]), float(orn[3])],
+            )
+            self._ee_target_mesh_uid[robot] = int(uid)
+        else:
+            # Update pose/color in-place.
+            try:
+                p.resetBasePositionAndOrientation(
+                    int(uid),
+                    [float(position_xyz[0]), float(position_xyz[1]), float(position_xyz[2])],
+                    [float(orn[0]), float(orn[1]), float(orn[2]), float(orn[3])],
+                )
+            except Exception:
+                pass
+            try:
+                p.changeVisualShape(int(uid), -1, rgbaColor=[float(rr), float(gg), float(bb), float(aa)])
+            except Exception:
+                pass
+
+        # Note: we intentionally do NOT register this marker for time-based expiry.
+        # The control loop can take longer than duration_s, and expiry cleanup runs
+        # inside env.step_simulation() (during motion). We keep a persistent marker
+        # body and update it in-place instead of deleting it.
 
         # Keep axis_len arg for backwards compatibility (no-op now).
         _ = float(axis_len)

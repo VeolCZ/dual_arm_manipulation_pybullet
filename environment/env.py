@@ -9,6 +9,7 @@ import random
 import os
 from typing import Iterable, Optional, Sequence
 import time
+import traceback
 
 class FailToReachTargetError(RuntimeError):
     pass
@@ -36,8 +37,8 @@ class Environment:
     ARM_FORCE_SCALE = 1.0
     ARM_POSITION_GAIN = 0.04
     ARM_VELOCITY_GAIN = 1.0
-    ROBOT_LINK_LINEAR_DAMPING = 0.04
-    ROBOT_LINK_ANGULAR_DAMPING = 0.04
+    ROBOT_LINK_LINEAR_DAMPING = 0.01
+    ROBOT_LINK_ANGULAR_DAMPING = 0.01
 
     # Optional per-arm yaw offsets (radians) for matching tool frame conventions.
     GRASP_YAW_OFFSET_LEFT = 0.0
@@ -171,6 +172,30 @@ class Environment:
 
         # define environment
         self.physicsClient = p.connect(p.GUI if self.vis else p.DIRECT)
+
+        # Optional debug: trace unexpected body removals/hides.
+        # Enable with env var: PB_TRACE_REMOVEBODY=1 (prints uid + short stack).
+        self._trace_removebody = str(os.getenv("PB_TRACE_REMOVEBODY", "")).strip().lower() in ("1", "true", "yes", "on")
+        if self._trace_removebody:
+            try:
+                if not hasattr(p, "_copilot_orig_removeBody"):
+                    p._copilot_orig_removeBody = p.removeBody
+
+                def _removeBody_traced(uid):
+                    try:
+                        uid_i = int(uid)
+                    except Exception:
+                        uid_i = uid
+                    try:
+                        stack = "".join(traceback.format_stack(limit=8))
+                    except Exception:
+                        stack = "<no stack>"
+                    print(f"[PB_TRACE_REMOVEBODY] removeBody({uid_i})\n{stack}")
+                    return p._copilot_orig_removeBody(uid)
+
+                p.removeBody = _removeBody_traced
+            except Exception:
+                pass
 
         # Optionally start PyBullet GUI without the left-side debug panels.
         # This matches the effect of pressing 'G' in the GUI.
@@ -473,10 +498,10 @@ class Environment:
         if vis:
             self.eef_debug_lineID = None
             # p.addUserDebugLine([camera.x, camera.y, camera.z - 0.15], [camera.x, camera.y, camera.z - 0.4], [0, 1, 0], lineWidth=5)
-            dist = 1.5
-            yaw = 30
-            pitch = -50
-            target = [0.1, -0.30, 0.95]
+            dist = 1.8
+            yaw = 0.0
+            pitch = -28.40
+            target = [0.04, -0.03, 0.9]
             p.resetDebugVisualizerCamera(dist, yaw, pitch, target)
 
             # camera model
@@ -1420,13 +1445,68 @@ class Environment:
                     now = time.time()
                     keep: list[tuple[int, float]] = []
                     for uid, t_exp in list(self._debug_bodies_expiry):
+                        uid_i = int(uid)
                         if float(t_exp) <= now:
+                            if getattr(self, "_trace_removebody", False):
+                                try:
+                                    active = list(int(x) for x in getattr(self, "obj_ids", []) if x is not None)
+                                except Exception:
+                                    active = []
+                                try:
+                                    cached = list(set(int(v) for v in getattr(self, "_isolated_obj_cache", {}).values() if v is not None))
+                                except Exception:
+                                    cached = []
+                                print(
+                                    f"[PB_TRACE_EXPIRY] firing uid={uid_i} active_obj_ids={active} cached_obj_ids_sample={cached[:5]}"
+                                )
+
+                            # Safety: never let debug cleanup remove real scene bodies.
+                            protected: set[int] = set(int(x) for x in getattr(self, "obj_ids", []) if x is not None)
+                            for attr in (
+                                "robot_id",
+                                "planeID",
+                                "tableID",
+                                "target_table_id",
+                                "target_id",
+                                "target_table_id_right",
+                                "target_id_right",
+                            ):
+                                try:
+                                    v = getattr(self, attr, None)
+                                    if v is not None:
+                                        protected.add(int(v))
+                                except Exception:
+                                    pass
+
+                            if uid_i in protected:
+                                # Drop it from the expiry list; it's not a debug body.
+                                continue
+
+                            # Additional safety: only remove visual-only marker bodies.
+                            # Our marker bodies are created with baseMass=0 and baseCollisionShapeIndex=-1.
                             try:
-                                p.removeBody(int(uid))
+                                dyn = p.getDynamicsInfo(uid_i, -1)
+                                mass = float(dyn[0]) if dyn is not None and len(dyn) > 0 else 0.0
+                            except Exception:
+                                mass = 0.0
+                            if abs(mass) > 1e-9:
+                                # Not a massless debug marker -> don't delete it.
+                                continue
+                            try:
+                                cdata = p.getCollisionShapeData(uid_i, -1)
+                                has_collision = bool(cdata)
+                            except Exception:
+                                has_collision = True
+                            if has_collision:
+                                # Has collision geometry -> not our visual-only marker.
+                                continue
+
+                            try:
+                                p.removeBody(uid_i)
                             except Exception:
                                 pass
                         else:
-                            keep.append((int(uid), float(t_exp)))
+                            keep.append((uid_i, float(t_exp)))
                     self._debug_bodies_expiry = keep
                 except Exception:
                     pass
@@ -1486,7 +1566,37 @@ class Environment:
         if uid < 0 or life <= 0.0:
             return
         try:
+            # De-dup: keep only the most recent expiry for a given uid.
+            self.unregister_debug_body_expiry(uid)
             self._debug_bodies_expiry.append((uid, time.time() + life))
+            if getattr(self, "_trace_removebody", False):
+                try:
+                    print(f"[PB_TRACE_EXPIRY] register uid={int(uid)} lifetime_s={float(life)}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def unregister_debug_body_expiry(self, body_uid: int) -> None:
+        """Remove a body from the debug expiry queue.
+
+        Needed because debug bodies can be removed early (e.g., when a new
+        marker replaces an old one). If the uid is later re-used by PyBullet,
+        a stale expiry entry could delete a real object.
+        """
+        try:
+            uid = int(body_uid)
+        except Exception:
+            return
+        if uid < 0:
+            return
+        try:
+            self._debug_bodies_expiry = [(int(u), float(t)) for (u, t) in self._debug_bodies_expiry if int(u) != uid]
+            if getattr(self, "_trace_removebody", False):
+                try:
+                    print(f"[PB_TRACE_EXPIRY] unregister uid={int(uid)}")
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -2212,6 +2322,11 @@ class Environment:
                 pass
 
     def _hide_body(self, body_id: int):
+        if getattr(self, "_trace_removebody", False):
+            try:
+                print(f"[PB_TRACE_HIDE] hide_body({int(body_id)})")
+            except Exception:
+                pass
         self._set_body_collision_enabled(body_id, False)
         try:
             p.resetBasePositionAndOrientation(body_id, *self._hidden_object_pose)
@@ -2366,9 +2481,19 @@ class Environment:
         if obj_id is None or not self._body_exists(obj_id):
             obj_id, pos_out, orn_out = self._load_obj_body(path, pos, yaw, mod_orn, mod_stiffness)
             self._isolated_obj_cache[key] = obj_id
+            if getattr(self, "_trace_removebody", False):
+                try:
+                    print(f"[PB_TRACE_OBJ] load new obj_id={int(obj_id)} path={str(path)}")
+                except Exception:
+                    pass
         else:
             # Reuse cached body.
             self._show_body(obj_id)
+            if getattr(self, "_trace_removebody", False):
+                try:
+                    print(f"[PB_TRACE_OBJ] reuse obj_id={int(obj_id)} path={str(path)}")
+                except Exception:
+                    pass
             orn_out = p.getQuaternionFromEuler([0, np.pi * 0.5, yaw]) if mod_orn else p.getQuaternionFromEuler([0, 0, yaw])
             p.resetBasePositionAndOrientation(obj_id, pos, orn_out)
             # Recompute height offset for current orientation.

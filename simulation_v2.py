@@ -101,6 +101,7 @@ class GrasppingScenarios:
 
         gripper_size = opening_len + 0.02
         finger_size = 0.075
+        z += 0.05   # lift the visualized grasp a bit for better visibility
         lineIDs.append(p.addUserDebugLine([x, y, z], [x, y, z + 0.15], color, lineWidth=6))
 
         lineIDs.append(
@@ -279,7 +280,7 @@ class GrasppingScenarios:
                     self.dummy_simulation_steps(10, env=env)
 
                     bgr, depth, _ = env.get_external_cam_img(return_depth=True, return_seg=False)
-                    if not self._scene_has_objects_from_depth(depth):
+                    if not self._scene_has_objects_from_top_down_depth_camera(depth):
                         break
 
                     viewer_warned = self._cameras_viewer(
@@ -324,19 +325,22 @@ class GrasppingScenarios:
                         self.dummy_simulation_steps(10, env=env)
 
                     # Visualize the selected grasp target pose using the EE target marker.
-                    if vis:
-                        x, y, z, yaw, opening_len, obj_height = grasps[idx]
-                        robot = "right" if float(x) < 0.0 else "left"
-                        try:
-                            orn = behaviors.env._tool0_quat_from_grasp_yaw(float(yaw))
-                        except Exception:
-                            orn = (0.0, 0.0, 0.0, 1.0)
-                        behaviors.visualize_target_ee_pose(
-                            robot,
-                            position_xyz=(float(x), float(y), float(z)),
-                            orientation_xyzw=orn,
-                            duration_s=2.0,
-                        )
+                    # if vis:
+                    #     x, y, z, yaw, opening_len, obj_height = grasps[idx]
+                    #     robot = "right" if float(x) < 0.0 else "left"
+                    #     try:
+                    #         orn = behaviors.env._tool0_quat_from_grasp_yaw(float(yaw))
+                    #     except Exception:
+                    #         orn = (0.0, 0.0, 0.0, 1.0)
+                    #     behaviors.visualize_target_ee_pose(
+                    #         robot,
+                    #         position_xyz=(float(x), float(y), float(z+0.2)),
+                    #         orientation_xyzw=orn,
+                    #         duration_s=2.0,
+                    #     )
+
+                    LID = self.draw_predicted_top_down_grasp(grasps[idx])
+
 
                     x, y, z, yaw, opening_len, obj_height = grasps[idx]
                     succes_grasp, succes_target = behaviors.grasp(
@@ -353,6 +357,11 @@ class GrasppingScenarios:
                         data.add_succes_grasp(obj_name)
                     if succes_target:
                         data.add_succes_target(obj_name)
+
+                    ## remove visualized grasp configuration 
+                    if vis:
+                        self.remove_drawing(LID)
+
 
                     behaviors.reset_robot("dual", steps=1000)
 
@@ -469,7 +478,7 @@ class GrasppingScenarios:
                     idx = 0
                     for attempt_idx in range(number_of_attempts):
                         bgr, depth, _ = env.get_external_cam_img(return_depth=True, return_seg=False)
-                        if not self._scene_has_objects_from_depth(depth):
+                        if not self._scene_has_objects_from_top_down_depth_camera(depth):
                             number_of_failures = number_of_attempts
                             break
 
