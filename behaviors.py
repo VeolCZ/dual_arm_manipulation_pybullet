@@ -748,8 +748,8 @@ class Behaviors:
         if robot != "dual" and robot != "any":
             raise ValueError("reset_robot currently supports only robot='dual'|'any'")
         ok = self.go_to_initial_top_pose("dual", steps=int(steps))
-        # Keep legacy semantics used by Environment.reset_robot(): 0.0 is fully open.
-        self.open_gripper("dual", opening_length=0.0)
+        # Keep legacy semantics used by Environment.reset_robot(): 1.0 is fully open.
+        self.open_gripper("dual", opening_length=1.0)
         return bool(ok)
 
     def grasp(
@@ -886,7 +886,7 @@ class Behaviors:
         # Spawn an STL mesh marker at the target pose (position + orientation).
         # This better communicates the full target pose than 3 debug lines.
         if stl_path is None:
-            stl_path = os.path.join(os.path.dirname(__file__), "full_hand_hamid_corrected_axes_tool0.stl")
+            stl_path = os.path.join(os.path.dirname(__file__), "environment/meshes/full_hand_hamid_corrected_axes_tool0.stl")
 
         orn = orientation_xyzw
         if orn is None:

@@ -135,13 +135,39 @@ class GraspGenerator:
 
     def predict(self, rgb, depth, n_grasps=1, show_output=False):
 
-        max_val = np.max(depth)
-        depth = depth * (255 / max_val)
-        depth = np.clip((depth - depth.mean())/175, -1, 1)
+        depth = np.asarray(depth, dtype=np.float32)
+        if depth.size == 0:
+            return [], None
+
+        # PyBullet returns a non-linear depth buffer in [0, 1].
+        # GR-ConvNet generally expects metric depth, so convert when the input looks like a buffer.
+        try:
+            d_min = float(np.nanmin(depth))
+            d_max = float(np.nanmax(depth))
+        except Exception:
+            return [], None
+
+        depth_for_net = depth
+        if (0.0 <= d_min <= 1.0) and (0.0 <= d_max <= 1.0):
+            # depth_buffer -> depth_meters
+            # z = far*near / (far - (far-near)*d)
+            d = np.clip(depth, 1e-6, 1.0 - 1e-6)
+            depth_for_net = (self.far * self.near) / (self.far - (self.far - self.near) * d)
+
+        max_val = float(np.nanmax(depth_for_net))
+        if (not np.isfinite(max_val)) or max_val <= 1e-9:
+            # Invalid/flat depth frame; return no grasps instead of producing NaNs.
+            return [], None
+
+        depth_for_net = depth_for_net * (255.0 / max_val)
+        depth_mean = float(np.nanmean(depth_for_net))
+        if not np.isfinite(depth_mean):
+            return [], None
+        depth_for_net = np.clip((depth_for_net - depth_mean) / 175.0, -1.0, 1.0)
         
         if (self.network == 'GR_ConvNet'):
             ##### GR-ConvNet #####
-            depth = np.expand_dims(np.array(depth), axis=2)
+            depth = np.expand_dims(np.array(depth_for_net), axis=2)
             img_data = CameraData(width=self.IMG_WIDTH, height=self.IMG_WIDTH)
             x, depth_img, rgb_img = img_data.get_data(rgb=rgb, depth=depth)
         else:
