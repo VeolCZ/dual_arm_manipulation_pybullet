@@ -378,21 +378,8 @@ class GrasppingScenarios:
                         self.remove_drawing(LID)
                         self.dummy_simulation_steps(10, env=env)
 
-                    # Visualize the selected grasp target pose using the EE target marker.
-                    if vis:
-                        # x, y, z, yaw, opening_len, obj_height = grasps[idx]
-                        # robot = "right" if float(x) < 0.0 else "left"
-                        # try:
-                        #     orn = behaviors.env._tool0_quat_from_grasp_yaw(float(yaw))
-                        # except Exception:
-                        #     orn = (0.0, 0.0, 0.0, 1.0)
-                        # behaviors.visualize_target_ee_pose(
-                        #     robot,
-                        #     position_xyz=(float(x), float(y), float(z+0.2)),
-                        #     orientation_xyzw=orn,
-                        #     duration_s=2.0,
-                        # )
-
+                    # Visualize the selected grasp pose
+                    if vis:                       
                         LID = self.draw_predicted_top_down_grasp(grasps[idx])
 
 
@@ -629,21 +616,8 @@ class GrasppingScenarios:
                                 number_of_failures += 1
                                 continue
 
-                        # Visualize the selected grasp target pose using the EE target marker.
-                        if vis:
-                            # x, y, z, yaw, opening_len, obj_height = grasps[idx]
-                            # robot = "right" if float(x) < 0.0 else "left"
-                            # try:
-                            #     orn = behaviors.env._tool0_quat_from_grasp_yaw(float(yaw))
-                            # except Exception:
-                            #     orn = (0.0, 0.0, 0.0, 1.0)
-                            # behaviors.visualize_target_ee_pose(
-                            #     robot,
-                            #     position_xyz=(float(x), float(y), float(z+0.2)),
-                            #     orientation_xyzw=orn,
-                            #     duration_s=2.0,
-                            # )
-    
+                        # Visualize the selected grasp pose
+                        if vis:   
                             LID = self.draw_predicted_top_down_grasp(grasps[idx])
 
 

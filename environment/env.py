@@ -35,10 +35,10 @@ class Environment:
 
     # Motor/physics tuning to reduce jitter in POSITION_CONTROL.
     ARM_FORCE_SCALE = 1.0
-    ARM_POSITION_GAIN = 0.04
+    ARM_POSITION_GAIN = 0.035
     ARM_VELOCITY_GAIN = 1.0
-    ROBOT_LINK_LINEAR_DAMPING = 0.01
-    ROBOT_LINK_ANGULAR_DAMPING = 0.01
+    ROBOT_LINK_LINEAR_DAMPING = 0.0001
+    ROBOT_LINK_ANGULAR_DAMPING = 0.0001
 
     # Optional per-arm yaw offsets (radians) for matching tool frame conventions.
     GRASP_YAW_OFFSET_LEFT = 0.0
@@ -297,8 +297,8 @@ class Environment:
         # -----------------------------
         # Load from an absolute path to make relative mesh paths reliable.
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        # dual_urdf_path = os.path.join(repo_root, "environment", "urdf", "dual_arm_robot_without_wrist_cameras.urdf.urdf")
-        dual_urdf_path = os.path.join(repo_root, "environment", "urdf", "dual_arm_robot_with_wrist_cameras.urdf.urdf")
+        # dual_urdf_path = os.path.join(repo_root, "environment", "urdf", "dual_arm_robot_without_wrist_cameras.urdf")
+        dual_urdf_path = os.path.join(repo_root, "environment", "urdf", "dual_arm_robot_with_wrist_cameras.urdf")
 
         self.robot_id = p.loadURDF(
             dual_urdf_path,
@@ -2476,14 +2476,7 @@ class Environment:
                 return False
 
             # time.sleep(1 / 120)
-            if check_contact and self._close_contact_detected():
-                # Stop squeezing and hold briefly to let contacts settle.
-                try:
-                    hold_steps = int(os.getenv("PB_GRIPPER_CLOSE_HOLD_STEPS", "10"))
-                except Exception:
-                    hold_steps = 10
-                if hold_steps > 0:
-                    self.move_gripper(current_target_open_length, hold_steps)
+            if check_contact and self.gripper_contact():
                 return True
         return False
 
@@ -2925,15 +2918,15 @@ class Environment:
 
             # Option2: Adaptable alpha based on distance: use larger steps when far, and slow down when near the target to avoid overshooting and allow settling. The specific scaling factor (0.5) and thresholds (0.05, 0.02) may require tuning based on the robot's dynamics and control gains.
             # Larger distance -> larger alpha (faster), near target -> smaller alpha (smoother).
-            try:
-                distance = float(np.linalg.norm(np.array((x, y, z)) - np.array(real_xyz)))
-            except Exception:
-                distance = 0.0
-            # Use a larger alpha when far (faster approach), and snap to alpha=1.0
-            # when very close to avoid stalling with tiny incremental targets.
-            alpha = float(np.clip(distance * 0.5, 0.05, 0.5))
-            if distance < 0.02:
-                alpha = 1.0
+            # try:
+            #     distance = float(np.linalg.norm(np.array((x, y, z)) - np.array(real_xyz)))
+            # except Exception:
+            #     distance = 0.0
+            # # Use a larger alpha when far (faster approach), and snap to alpha=1.0
+            # # when very close to avoid stalling with tiny incremental targets.
+            # alpha = float(np.clip(distance * 0.5, 0.05, 0.5))
+            # if distance < 0.02:
+            #     alpha = 1.0
 
             
 
@@ -2956,10 +2949,10 @@ class Environment:
 
             # Ramp up position gain near target to reduce steady-state error.
             pos_gain = float(self.ARM_POSITION_GAIN)
-            if distance < 0.05:
-                pos_gain = min(0.2, pos_gain * 4.0)
-            if distance < 0.02:
-                pos_gain = min(0.3, pos_gain * 6.0)
+            # if distance < 0.05:
+            #     pos_gain = min(0.2, pos_gain * 4.0)
+            # if distance < 0.02:
+            #     pos_gain = min(0.3, pos_gain * 6.0)
 
             for i, name in enumerate(arm_joint_names):
                 joint = self.joints[name]
@@ -3068,19 +3061,19 @@ class Environment:
         self.move_ee([x, y, z + z_offset, orn])
         # self.move_gripper(gripper_opening_length)
         self.auto_close_gripper(check_contact=True)
-        for _ in range(150):
+        for _ in range(100):
             self.step_simulation()
         # time.sleep(0.15)
 
         self.move_ee([x, y, self.GRIPPER_MOVING_HEIGHT, orn])
 
         # # If the object has been grasped and lifted off the table
-        # grasped_id = self.check_grasped_id()
-        # if len(grasped_id) == 1:
-        #     succes_grasp = True
-        #     grasped_obj_id = grasped_id[0]
-        # else:
-        #     return succes_target, succes_grasp
+        grasped_id = self.check_grasped_id()
+        if len(grasped_id) == 1:
+            succes_grasp = True
+            grasped_obj_id = grasped_id[0]
+        else:
+            return succes_target, succes_grasp
 
         # Move object to target zone
         target_pos = self._target_zone_pos_by_arm[self.active_arm]
