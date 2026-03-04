@@ -1,8 +1,11 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 import torch.utils.data
 from PIL import Image
 from datetime import datetime
+import sys
+import pickle
 
 from network.hardware.device import get_device
 #from network.inference.post_process import post_process_output
@@ -23,21 +26,44 @@ class GraspGenerator:
 
     def __init__(self, net_path, camera, depth_radius, fig, IMG_WIDTH=224, network='GR_ConvNet', device='cpu'):
 
-        if (device=='cpu'):
-            try:
-                self.net = torch.load(net_path, map_location=device, weights_only=False)
-            except TypeError:
-                self.net = torch.load(net_path, map_location=device)
-            self.device = get_device(force_cpu=True)
-        else:
-            #self.net = torch.load(net_path, map_location=lambda storage, loc: storage.cuda(1))
-            #self.device = get_device()
-            print ("GPU is not supported yet! :( -- continuing experiment on CPU!" )
-            try:
-                self.net = torch.load(net_path, map_location='cpu', weights_only=False)
-            except TypeError:
-                self.net = torch.load(net_path, map_location='cpu')
-            self.device = get_device(force_cpu=True)
+        # Ensure the GR_ConvNet checkpoint's Python modules are importable.
+        # The saved model is typically a pickled object referencing `inference.*`.
+        try:
+            net_dir = os.path.dirname(os.path.abspath(str(net_path)))
+            model_root = os.path.abspath(os.path.join(net_dir, os.pardir))
+            if os.path.isdir(os.path.join(model_root, "inference")) and model_root not in sys.path:
+                sys.path.append(model_root)
+        except Exception:
+            pass
+
+        device_s = str(device).strip().lower() if device is not None else "cpu"
+        want_cuda = device_s not in ("cpu", "none", "false", "0")
+        have_cuda = bool(torch.cuda.is_available())
+
+        if want_cuda and not have_cuda:
+            print("CUDA requested but torch.cuda.is_available() is False; falling back to CPU.")
+        force_cpu = (not want_cuda) or (not have_cuda)
+        self.device = get_device(force_cpu=force_cpu)
+
+        # PyTorch 2.6+ defaults `weights_only=True`, which breaks loading full model objects.
+        # These checkpoints were produced via torch.save(model), so we load with weights_only=False.
+        try:
+            self.net = torch.load(net_path, map_location=self.device, weights_only=False)
+        except TypeError:
+            # Older torch without weights_only arg.
+            self.net = torch.load(net_path, map_location=self.device)
+        except pickle.UnpicklingError:
+            # As a last resort, retry without weights_only if caller is on a torch version that changed defaults.
+            self.net = torch.load(net_path, map_location=self.device, weights_only=False)
+
+        try:
+            self.net.to(self.device)
+        except Exception:
+            pass
+        try:
+            self.net.eval()
+        except Exception:
+            pass
 
         # print (self.net)
 

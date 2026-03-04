@@ -225,6 +225,15 @@ class Environment:
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setTimeStep(1.0 / 240.0)
         p.setPhysicsEngineParameter(numSolverIterations=200)
+        # Improve contact stability for high-friction grasps.
+        try:
+            p.setPhysicsEngineParameter(enableConeFriction=1)
+        except Exception:
+            pass
+        try:
+            p.setPhysicsEngineParameter(useSplitImpulse=1)
+        except Exception:
+            pass
         p.setGravity(0, 0, -10)
         self.planeID = p.loadURDF('plane.urdf')
         self.tableID = p.loadURDF('environment/urdf/objects/table.urdf',
@@ -317,6 +326,28 @@ class Environment:
             self.joint_id_to_movable_index,
             self.link_name_to_id,
         ) = setup_dual_arm_sisbot(p, self.robot_id, gripper_type)
+
+        # Gripper self-collisions can cause severe contact instability (links appear to
+        # "disconnect"/explode during grasps). Disable collisions within each gripper.
+        disable_gripper_self_collision = str(os.getenv("PB_GRIPPER_DISABLE_SELF_COLLISION", "1")).strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+        if disable_gripper_self_collision:
+            try:
+                for prefix in ("lgripper_", "rgripper_"):
+                    link_ids = [int(ji.id) for name, ji in getattr(self, "joints", {}).items() if str(name).startswith(prefix)]
+                    # Pairwise disable collisions within the gripper.
+                    for i in range(len(link_ids)):
+                        for j in range(i + 1, len(link_ids)):
+                            try:
+                                p.setCollisionFilterPair(self.robot_id, self.robot_id, link_ids[i], link_ids[j], enableCollision=0)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
 
         # -----------------------------
         # Link-mounted cameras
@@ -474,10 +505,22 @@ class Environment:
             left_pad, right_pad = self._pad_joint_by_arm[arm]
             if left_pad in self.joints:
                 p.enableJointForceTorqueSensor(self.robot_id, self.joints[left_pad].id)
-                p.changeDynamics(self.robot_id, self.joints[left_pad].id, lateralFriction=1)
+                p.changeDynamics(
+                    self.robot_id,
+                    self.joints[left_pad].id,
+                    lateralFriction=2.5,
+                    spinningFriction=0.1,
+                    rollingFriction=0.1,
+                )
             if right_pad in self.joints:
                 p.enableJointForceTorqueSensor(self.robot_id, self.joints[right_pad].id)
-                p.changeDynamics(self.robot_id, self.joints[right_pad].id, lateralFriction=1)
+                p.changeDynamics(
+                    self.robot_id,
+                    self.joints[right_pad].id,
+                    lateralFriction=2.5,
+                    spinningFriction=0.1,
+                    rollingFriction=0.1,
+                )
 
         # custom sliders to tune parameters (name of the parameter,range,initial value)
         # Task space (Cartesian space)
@@ -504,19 +547,19 @@ class Environment:
             target = [0.04, -0.03, 0.9]
             p.resetDebugVisualizerCamera(dist, yaw, pitch, target)
 
-            # camera model
+            vis_camera_z =  camera.z + 0.1 #m - adjust camera height to be more in line with the table/workspace and avoid looking at the ceiling.
             alpha = 0.025 #m 
-            z_cam_l1 = camera.z #m 
+            z_cam_l1 = vis_camera_z #m 
 
             color = [0.3, 0, 0]
-            p.addUserDebugText("External RGB-D camera", [camera.x-0.1, camera.y, camera.z+0.02], color, textSize=2)
+            p.addUserDebugText("External RGB-D camera", [camera.x-0.2, camera.y, vis_camera_z+0.02], color, textSize=1)
              
             p.addUserDebugLine([camera.x+alpha, camera.y+alpha, z_cam_l1], [camera.x+alpha, camera.y-alpha, z_cam_l1], color, lineWidth=4)
             p.addUserDebugLine([camera.x+alpha, camera.y-alpha, z_cam_l1], [camera.x-alpha, camera.y-alpha, z_cam_l1], color, lineWidth=4)
             p.addUserDebugLine([camera.x-alpha, camera.y-alpha, z_cam_l1], [camera.x-alpha, camera.y+alpha, z_cam_l1], color, lineWidth=4)
             p.addUserDebugLine([camera.x-alpha, camera.y+alpha, z_cam_l1], [camera.x+alpha, camera.y+alpha, z_cam_l1], color, lineWidth=4)
         
-            z_cam_l2 = camera.z - 0.07 #m 
+            z_cam_l2 = vis_camera_z - 0.05 #m 
                
             p.addUserDebugLine([camera.x+alpha, camera.y+alpha, z_cam_l2], [camera.x+alpha, camera.y-alpha, z_cam_l2], color, lineWidth=4)
             p.addUserDebugLine([camera.x+alpha, camera.y-alpha, z_cam_l2], [camera.x-alpha, camera.y-alpha, z_cam_l2], color, lineWidth=4)
@@ -530,7 +573,7 @@ class Environment:
             p.addUserDebugLine([camera.x-alpha, camera.y+alpha, z_cam_l1], [camera.x-alpha, camera.y+alpha, z_cam_l2], color, lineWidth=4)
 
             ### Third rectangle             
-            z_cam_l3 = camera.z - 0.125 #m 
+            z_cam_l3 = vis_camera_z - 0.105 #m 
             beta = alpha * 2 
             p.addUserDebugLine([camera.x+beta, camera.y+beta, z_cam_l3], [camera.x+beta, camera.y-beta, z_cam_l3], color, lineWidth=4)
             p.addUserDebugLine([camera.x+beta, camera.y-beta, z_cam_l3], [camera.x-beta, camera.y-beta, z_cam_l3], color, lineWidth=4)
@@ -542,6 +585,109 @@ class Environment:
             p.addUserDebugLine([camera.x+alpha, camera.y-alpha, z_cam_l2], [camera.x+beta, camera.y-beta, z_cam_l3], color, lineWidth=4)
             p.addUserDebugLine([camera.x-alpha, camera.y-alpha, z_cam_l2], [camera.x-beta, camera.y-beta, z_cam_l3], color, lineWidth=4)
             p.addUserDebugLine([camera.x-alpha, camera.y+alpha, z_cam_l2], [camera.x-beta, camera.y+beta, z_cam_l3], color, lineWidth=4)
+
+
+            # External camera model (D435) as a visual mesh instead of debug lines.
+            # This is GUI-only; for DIRECT runs it does nothing.
+            # self._external_camera_model_id = None
+            # try:
+            #     repo_root_vis = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+            #     d435_mesh_path = os.path.join(repo_root_vis, "environment", "meshes", "d435.dae")
+
+            #     # Compute a reasonable pose: put the model at (camera.x,y,z) and point it
+            #     # toward the camera look-at target.
+            #     eye = np.array([float(camera.x), float(camera.y), float(camera.z)], dtype=float)
+            #     tgt = np.array([float(camera.x_t), float(camera.y_t), float(camera.z_t)], dtype=float)
+            #     fwd = tgt - eye
+            #     fn = float(np.linalg.norm(fwd))
+            #     if fn < 1e-9:
+            #         fwd = np.array([1.0, 0.0, 0.0], dtype=float)
+            #     else:
+            #         fwd = fwd / fn
+            #     up = np.array([0.0, 0.0, 1.0], dtype=float)
+            #     right = np.cross(fwd, up)
+            #     rn = float(np.linalg.norm(right))
+            #     if rn < 1e-9:
+            #         # If fwd is parallel to world-up, pick an arbitrary right axis.
+            #         right = np.array([1.0, 0.0, 0.0], dtype=float)
+            #     else:
+            #         right = right / rn
+            #     up_ortho = np.cross(right, fwd)
+            #     un = float(np.linalg.norm(up_ortho))
+            #     if un < 1e-9:
+            #         up_ortho = up
+            #     else:
+            #         up_ortho = up_ortho / un
+
+            #     # Local convention for the mesh: X=forward, Z=up.
+            #     # (If the mesh appears rotated, tweak the fixed RPY below.)
+            #     x_axis = fwd
+            #     z_axis = up_ortho
+            #     # Right-handed Y axis.
+            #     y_axis = np.cross(z_axis, x_axis)
+            #     yn = float(np.linalg.norm(y_axis))
+            #     if yn < 1e-9:
+            #         y_axis = right
+            #     else:
+            #         y_axis = y_axis / yn
+            #     # Re-orthogonalize Z.
+            #     z_axis = np.cross(x_axis, y_axis)
+            #     zn = float(np.linalg.norm(z_axis))
+            #     if zn < 1e-9:
+            #         z_axis = up_ortho
+            #     else:
+            #         z_axis = z_axis / zn
+
+            #     R_cam = np.stack([x_axis, y_axis, z_axis], axis=1)
+            #     q_xyzw = self._quat_from_rotm(R_cam)
+
+            #     # Optional fixed correction if the mesh's local axes don't match.
+            #     # Keeping this as an attribute makes it easy to tune from the REPL.
+            #     self.external_camera_model_rpy_offset = getattr(
+            #         self,
+            #         "external_camera_model_rpy_offset",
+            #         (0.0, 0.0, 0.0),
+            #     )
+            #     q_off = p.getQuaternionFromEuler(
+            #         [
+            #             float(self.external_camera_model_rpy_offset[0]),
+            #             float(self.external_camera_model_rpy_offset[1]),
+            #             float(self.external_camera_model_rpy_offset[2]),
+            #         ]
+            #     )
+            #     q_xyzw = p.multiplyTransforms([0, 0, 0], q_xyzw, [0, 0, 0], q_off)[1]
+
+            #     # D435 mesh scale: default to 1.0 (meters). If it looks wrong, adjust.
+            #     self.external_camera_model_scale = float(getattr(self, "external_camera_model_scale", 1.0))
+
+            #     vis_shape = p.createVisualShape(
+            #         shapeType=p.GEOM_MESH,
+            #         fileName=d435_mesh_path,
+            #         meshScale=[self.external_camera_model_scale] * 3,
+            #         rgbaColor=[0.2, 0.2, 0.2, 1.0],
+            #         specularColor=[0.2, 0.2, 0.2],
+            #     )
+            #     self._external_camera_model_id = p.createMultiBody(
+            #         baseMass=0.0,
+            #         baseVisualShapeIndex=vis_shape,
+            #         baseCollisionShapeIndex=-1,
+            #         basePosition=eye.tolist(),
+            #         baseOrientation=q_xyzw,
+            #     )
+            #     # Make sure it doesn't affect dynamics.
+            #     p.changeDynamics(self._external_camera_model_id, -1, lateralFriction=0.0)
+            # except Exception as _e:
+            #     # Fall back to a simple label if the mesh cannot be loaded.
+            #     try:
+            #         color = [0.3, 0, 0]
+            #         p.addUserDebugText(
+            #             "External RGB-D camera",
+            #             [camera.x - 0.1, camera.y, camera.z + 0.02],
+            #             color,
+            #             textSize=2,
+            #         )
+            #     except Exception:
+            #         pass
 
             ### working area             
             working_area = 0.79 #m 
@@ -2228,22 +2374,80 @@ class Environment:
     def gripper_contact(self, bool_operator='and', force=250):
         left_index, right_index = self._get_pad_joint_ids(None)
 
-        contact_left = p.getContactPoints( bodyA=self.robot_id, linkIndexA=left_index)
-        contact_right = p.getContactPoints( bodyA=self.robot_id, linkIndexA=right_index)
+        contact_left = p.getContactPoints(bodyA=self.robot_id, linkIndexA=left_index)
+        contact_right = p.getContactPoints(bodyA=self.robot_id, linkIndexA=right_index)
+
+        # Filter to contacts against currently spawned objects when possible.
+        try:
+            obj_ids = set(getattr(self, "obj_ids", []) or [])
+        except Exception:
+            obj_ids = set()
+        if obj_ids:
+            contact_left = [cp for cp in contact_left if cp[2] in obj_ids]
+            contact_right = [cp for cp in contact_right if cp[2] in obj_ids]
 
         if bool_operator == 'and' and not (contact_right and contact_left):
             return False
 
-        # Check the force
-        left_force = p.getJointState(self.robot_id, left_index)[2][:3]  # 6DOF, Torque is ignored
-        right_force = p.getJointState(self.robot_id, right_index)[2][:3]
-        left_norm, right_norm = np.linalg.norm(left_force), np.linalg.norm(right_force)
-        
-        # print(left_norm, right_norm)
+        # Prefer contact normal forces from getContactPoints (more directly tied to
+        # actual contacts than joint reaction forces).
+        def _sum_normal_forces(cps):
+            total = 0.0
+            for cp in cps:
+                try:
+                    # Normal force is index 9 in PyBullet's contact point tuple.
+                    total += float(cp[9])
+                except Exception:
+                    pass
+            return float(total)
+
+        left_nf = _sum_normal_forces(contact_left)
+        right_nf = _sum_normal_forces(contact_right)
+
+        # If force is <= 0, treat any qualifying contact as contact.
+        try:
+            force_th = float(force)
+        except Exception:
+            force_th = 0.0
+
+        if force_th <= 0.0:
+            if bool_operator == 'and':
+                return bool(contact_left) and bool(contact_right)
+            return bool(contact_left) or bool(contact_right)
+
         if bool_operator == 'and':
-            return left_norm > force and right_norm > force
+            return left_nf > force_th and right_nf > force_th
         else:
-            return left_norm > force or right_norm > force
+            return left_nf > force_th or right_nf > force_th
+
+    def _close_contact_detected(self) -> bool:
+        """Contact predicate used for 'stop closing' behavior.
+
+        Uses a more permissive default than `gripper_contact()`'s legacy defaults,
+        and is configurable via env vars.
+        """
+        bool_op = str(os.getenv("PB_GRIPPER_CLOSE_CONTACT_BOOL", "or")).strip().lower()
+        if bool_op not in ("and", "or"):
+            bool_op = "or"
+        try:
+            force_th = float(os.getenv("PB_GRIPPER_CLOSE_CONTACT_FORCE", "5"))
+        except Exception:
+            force_th = 5.0
+        try:
+            debug = str(os.getenv("PB_GRIPPER_CLOSE_CONTACT_DEBUG", "0")).strip().lower() not in (
+                "0",
+                "false",
+                "no",
+                "off",
+                "",
+            )
+        except Exception:
+            debug = False
+
+        hit = bool(self.gripper_contact(bool_operator=bool_op, force=force_th))
+        if debug:
+            print(f"[gripper] close_contact: op={bool_op} force_th={force_th} -> {int(hit)}")
+        return hit
 
     def move_gripper(self, gripper_opening_length: float, step: int = 120):
         gripper_opening_length = np.clip( gripper_opening_length, *self.gripper_open_limit)
@@ -2272,7 +2476,14 @@ class Environment:
                 return False
 
             # time.sleep(1 / 120)
-            if check_contact and self.gripper_contact():
+            if check_contact and self._close_contact_detected():
+                # Stop squeezing and hold briefly to let contacts settle.
+                try:
+                    hold_steps = int(os.getenv("PB_GRIPPER_CLOSE_HOLD_STEPS", "10"))
+                except Exception:
+                    hold_steps = 10
+                if hold_steps > 0:
+                    self.move_gripper(current_target_open_length, hold_steps)
                 return True
         return False
 
@@ -2371,25 +2582,32 @@ class Environment:
 
     def _apply_object_dynamics(self, obj_id: int, mod_stiffness: bool):
         try:
+            # Objects must have sufficient friction too; otherwise they will still
+            # slip/roll out even if the finger pads are high-friction.
+            obj_lat_fric = float(os.getenv("PB_OBJECT_LATERAL_FRICTION", "2.5"))
+            obj_roll_fric = float(os.getenv("PB_OBJECT_ROLLING_FRICTION", "0.01"))
+            obj_spin_fric = float(os.getenv("PB_OBJECT_SPINNING_FRICTION", "0.01"))
             if mod_stiffness:
                 p.changeDynamics(
                     obj_id,
                     -1,
-                    lateralFriction=1,
-                    rollingFriction=0.001,
-                    spinningFriction=0.002,
-                    restitution=0.01,
+                    lateralFriction=obj_lat_fric,
+                    rollingFriction=obj_roll_fric,
+                    spinningFriction=obj_spin_fric,
+                    restitution=0.0,
+                    frictionAnchor=1,
                     contactStiffness=100000,
-                    contactDamping=0.0,
+                    contactDamping=50.0,
                 )
             else:
                 p.changeDynamics(
                     obj_id,
                     -1,
-                    lateralFriction=1,
-                    rollingFriction=0.002,
-                    spinningFriction=0.001,
-                    restitution=0.01,
+                    lateralFriction=obj_lat_fric,
+                    rollingFriction=obj_roll_fric,
+                    spinningFriction=obj_spin_fric,
+                    restitution=0.0,
+                    frictionAnchor=1,
                 )
         except Exception:
             pass
@@ -2702,6 +2920,10 @@ class Environment:
         for _ in range(max_step_i):
 
             # Smoothing: blend target toward current EE position.
+            ## Option1: A fixed alpha to a small value (e.g., 0.1-0.3) for consistent timing and smoother trajectories, but may require tuning of max_step_i to ensure convergence within the step budget. Too small alpha can cause slow convergence, while too large can cause overshooting and instability, especially with complex dynamics or low control gains.
+            alpha = 0.2  # Fixed alpha for more consistent timing; may require tuning of max_step_i.
+
+            # Option2: Adaptable alpha based on distance: use larger steps when far, and slow down when near the target to avoid overshooting and allow settling. The specific scaling factor (0.5) and thresholds (0.05, 0.02) may require tuning based on the robot's dynamics and control gains.
             # Larger distance -> larger alpha (faster), near target -> smaller alpha (smoother).
             try:
                 distance = float(np.linalg.norm(np.array((x, y, z)) - np.array(real_xyz)))
@@ -2712,6 +2934,8 @@ class Environment:
             alpha = float(np.clip(distance * 0.5, 0.05, 0.5))
             if distance < 0.02:
                 alpha = 1.0
+
+            
 
             # apply IK
             x_tmp = alpha * x + (1-alpha)*real_xyz[0]
@@ -2750,9 +2974,10 @@ class Environment:
                     if custom_velocity is None
                     else float(custom_velocity) * (i + 1),
                     positionGain=pos_gain,
-                    velocityGain=self.ARM_VELOCITY_GAIN,
+                    #velocityGain=self.ARM_VELOCITY_GAIN,
                 )
 
+               
             # Let the arm settle toward the current IK target for a few physics steps.
             # Near the target alpha is small -> use more substeps.
             try:
@@ -2762,14 +2987,14 @@ class Environment:
             for _sub in range(substeps):
                 self.step_simulation()
 
-            if try_close_gripper and still_open_flag_ and not self.gripper_contact():
+            if try_close_gripper and still_open_flag_ and not self._close_contact_detected():
                 still_open_flag_ = self.close_gripper(check_contact=True)
 
             # Check if contact with objects
-            if check_collision_config and self.gripper_contact(**check_collision_config):
-                if self.debug:
-                    print('Collision detected!', self.check_grasped_id())
-                return False, p.getLinkState(self.robot_id, eef_id)[0:2]
+            # if check_collision_config and self.gripper_contact(**check_collision_config):
+            #     if self.debug:
+            #         print('Collision detected!', self.check_grasped_id())
+            #     return False, p.getLinkState(self.robot_id, eef_id)[0:2]
 
             # Check xyz and rpy error
             real_xyz, real_xyzw = p.getLinkState(self.robot_id, eef_id)[0:2]
@@ -2843,17 +3068,19 @@ class Environment:
         self.move_ee([x, y, z + z_offset, orn])
         # self.move_gripper(gripper_opening_length)
         self.auto_close_gripper(check_contact=True)
-        for _ in range(100):
+        for _ in range(150):
             self.step_simulation()
+        # time.sleep(0.15)
+
         self.move_ee([x, y, self.GRIPPER_MOVING_HEIGHT, orn])
 
-        # If the object has been grasped and lifted off the table
-        grasped_id = self.check_grasped_id()
-        if len(grasped_id) == 1:
-            succes_grasp = True
-            grasped_obj_id = grasped_id[0]
-        else:
-            return succes_target, succes_grasp
+        # # If the object has been grasped and lifted off the table
+        # grasped_id = self.check_grasped_id()
+        # if len(grasped_id) == 1:
+        #     succes_grasp = True
+        #     grasped_obj_id = grasped_id[0]
+        # else:
+        #     return succes_target, succes_grasp
 
         # Move object to target zone
         target_pos = self._target_zone_pos_by_arm[self.active_arm]

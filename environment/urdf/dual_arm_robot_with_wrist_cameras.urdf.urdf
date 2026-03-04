@@ -112,6 +112,11 @@
     </visual>
   </link>
     <link name="robot_body_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
     <visual>
       <geometry>
         <!-- <mesh filename="../meshes/intuition_body/IRL_robot_body.dae" scale="0.011 0.012 0.0105"/> -->
@@ -124,6 +129,11 @@
     </visual>
   </link>
   <link name="robot_back_body_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
     <visual>
       <geometry>
         <!-- <mesh filename="../meshes/intuition_body/robot_body_back.dae" scale="0.0113 0.0120 0.01055"/> -->
@@ -140,7 +150,7 @@
     <inertial>
       <mass value="2"/>
       <origin xyz="0 0 0.0"/>
-      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.5"/>
+      <inertia ixx="0.1358" ixy="0" ixz="0" iyy="0.1358" iyz="0" izz="0.0016"/>
     </inertial>
     <visual>
       <origin xyz="0 0 0.0208"/>
@@ -154,7 +164,7 @@
     <inertial>
       <mass value="2"/>
       <origin xyz="0 0 0.0"/>
-      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.5"/>
+      <inertia ixx="0.00737" ixy="0" ixz="0" iyy="0.00737" iyz="0" izz="0.00141"/>
     </inertial>
     <visual>
       <origin xyz="0 0 0.04"/>
@@ -165,6 +175,11 @@
   </link>
 
   <link name="robot_head_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
     <visual>
       <geometry>
         <mesh filename="../meshes/dual_arm_head/blue_head_with_headphone.obj" scale="0.04 0.04 0.04"/>
@@ -201,7 +216,13 @@
     <child link="robot_back_body_link"/>
   </joint>
   <!-- optional world base frame -->
-  <link name="world_base_link"/>
+  <link name="world_base_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
   <joint name="robot_world_link" type="fixed">
     <origin rpy="0 0 -1.57" xyz="0 0 0"/>
     <parent link="body_base_link"/>
@@ -223,7 +244,13 @@
         added the base_link_inertia link that carries the visual, collision and inertia
         information.
     -->
-  <link name="left_base_link"/>
+  <link name="left_base_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
   <link name="left_base_link_inertia">
     <visual>
       <origin rpy="0.0 0.0 3.141592653589793" xyz="0.0 0.0 0.0"/>
@@ -443,14 +470,26 @@
     <limit effort="28.0" lower="-6.283185307179586" upper="6.283185307179586" velocity="3.141592653589793"/>
     <dynamics damping="0" friction="0"/>
   </joint>
-  <link name="left_ft_frame"/>
+  <link name="left_ft_frame">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
   <joint name="left_wrist_3_link-ft_frame" type="fixed">
     <parent link="left_wrist_3_link"/>
     <child link="left_ft_frame"/>
     <origin rpy="3.141592653589793 0 0" xyz="0 0 0"/>
   </joint>
   <!-- ROS-Industrial 'base' frame - base_link to UR 'Base' Coordinates transform -->
-  <link name="left_base"/>
+  <link name="left_base">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
   <joint name="left_base_link-base_fixed_joint" type="fixed">
     <!-- Note the rotation over Z of pi radians - as base_link is REP-103
            aligned (i.e., has X+ forward, Y+ left and Z+ up), this is needed
@@ -462,14 +501,26 @@
     <child link="left_base"/>
   </joint>
   <!-- ROS-Industrial 'flange' frame - attachment point for EEF models -->
-  <link name="left_flange"/>
+  <link name="left_flange">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
   <joint name="left_wrist_3-flange" type="fixed">
     <parent link="left_wrist_3_link"/>
     <child link="left_flange"/>
     <origin rpy="0 -1.5707963267948966 -1.5707963267948966" xyz="0 0 0"/>
   </joint>
   <!-- ROS-Industrial 'tool0' frame - all-zeros tool frame -->
-  <link name="left_tool0"/>
+  <link name="left_tool0">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
   <joint name="left_flange-tool0" type="fixed">
     <!-- default toolframe - X+ left, Y+ up, Z+ front -->
     <origin rpy="1.5707963267948966 0 1.5707963267948966" xyz="0 0 0"/>
@@ -483,7 +534,13 @@
         added the base_link_inertia link that carries the visual, collision and inertia
         information.
     -->
-  <link name="right_base_link"/>
+  <link name="right_base_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
   <link name="right_base_link_inertia">
     <visual>
       <origin rpy="0.0 0.0 3.141592653589793" xyz="0.0 0.0 0.0"/>
@@ -703,14 +760,26 @@
     <limit effort="28.0" lower="-6.283185307179586" upper="6.283185307179586" velocity="3.141592653589793"/>
     <dynamics damping="0" friction="0"/>
   </joint>
-  <link name="right_ft_frame"/>
+  <link name="right_ft_frame">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
   <joint name="right_wrist_3_link-ft_frame" type="fixed">
     <parent link="right_wrist_3_link"/>
     <child link="right_ft_frame"/>
     <origin rpy="3.141592653589793 0 0" xyz="0 0 0"/>
   </joint>
   <!-- ROS-Industrial 'base' frame - base_link to UR 'Base' Coordinates transform -->
-  <link name="right_base"/>
+  <link name="right_base">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
   <joint name="right_base_link-base_fixed_joint" type="fixed">
     <!-- Note the rotation over Z of pi radians - as base_link is REP-103
            aligned (i.e., has X+ forward, Y+ left and Z+ up), this is needed
@@ -722,14 +791,26 @@
     <child link="right_base"/>
   </joint>
   <!-- ROS-Industrial 'flange' frame - attachment point for EEF models -->
-  <link name="right_flange"/>
+  <link name="right_flange">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
   <joint name="right_wrist_3-flange" type="fixed">
     <parent link="right_wrist_3_link"/>
     <child link="right_flange"/>
     <origin rpy="0 -1.5707963267948966 -1.5707963267948966" xyz="0 0 0"/>
   </joint>
   <!-- ROS-Industrial 'tool0' frame - all-zeros tool frame -->
-  <link name="right_tool0"/>
+  <link name="right_tool0">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
   <joint name="right_flange-tool0" type="fixed">
     <!-- default toolframe - X+ left, Y+ up, Z+ front -->
     <origin rpy="1.5707963267948966 0 1.5707963267948966" xyz="0 0 0"/>
@@ -828,6 +909,11 @@
     </collision>
   </link>
   <link name="lgripper_left_inner_finger_pad">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
@@ -936,6 +1022,11 @@
     </collision>
   </link>
   <link name="lgripper_right_inner_finger_pad">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
@@ -1161,6 +1252,11 @@
     </collision>
   </link>
   <link name="rgripper_left_inner_finger_pad">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
@@ -1269,6 +1365,11 @@
     </collision>
   </link>
   <link name="rgripper_right_inner_finger_pad">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
@@ -1776,6 +1877,11 @@
   </gazebo>
   <!-- Base link of camera -->
   <link name="left_arm_camera_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.05"/>
+      <inertia ixx="1e-4" ixy="0" ixz="0" iyy="1e-4" iyz="0" izz="1e-4"/>
+    </inertial>
     <!-- ========================================================= -->
     <!-- Visual model of D435 (or other camera)                    -->
     <!-- ========================================================= -->
@@ -1861,6 +1967,11 @@
   </gazebo>
   <!-- Base link of camera -->
   <link name="right_arm_camera_link">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="0.05"/>
+      <inertia ixx="1e-4" ixy="0" ixz="0" iyy="1e-4" iyz="0" izz="1e-4"/>
+    </inertial>
     <!-- ========================================================= -->
     <!-- Visual model of D435 (or other camera)                    -->
     <!-- ========================================================= -->

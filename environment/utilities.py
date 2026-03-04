@@ -1,3 +1,5 @@
+import os
+
 import pybullet as p
 from collections import namedtuple
 from attrdict import AttrDict
@@ -41,15 +43,40 @@ def setup_sisbot(p, robotID, gripper_type):
         controlMode = kwargs.pop("controlMode")
         if controlMode == p.POSITION_CONTROL:
             pose = kwargs.pop("targetPosition")
+            # Default gripper motor tuning: stronger + less compliant.
+            # (Prevents finger joints from being pushed open by contacts.)
+            force_floor = float(os.getenv("PB_GRIPPER_FORCE_N", "800" if gripper_type == "140" else "200"))
+            position_gain = float(os.getenv("PB_GRIPPER_PGAIN", "0.6"))
+            velocity_gain = float(os.getenv("PB_GRIPPER_VGAIN", "1.0"))
+            max_vel = float(os.getenv("PB_GRIPPER_MAX_VEL", "0.3"))
+
+            def _clamp_to_limits(j, q: float) -> float:
+                try:
+                    ll = float(getattr(j, "lowerLimit", 0.0))
+                    ul = float(getattr(j, "upperLimit", -1.0))
+                except Exception:
+                    return float(q)
+                if ul > ll and (ul - ll) < 1e6:
+                    return float(min(max(float(q), ll), ul))
+                return float(q)
+
+            pose = _clamp_to_limits(parent, float(pose))
+
+            parent_force = max(force_floor, float(parent.maxForce))
+            parent_max_vel = max(1e-3, min(max_vel, float(parent.maxVelocity) if float(parent.maxVelocity) > 0 else max_vel))
             # move parent joint
             p.setJointMotorControl2(robotID, parent.id, controlMode, targetPosition=pose,
-                                    force=parent.maxForce, maxVelocity=parent.maxVelocity)
+                                    force=parent_force, maxVelocity=parent_max_vel,
+                                    positionGain=position_gain, velocityGain=velocity_gain)
             # move child joints
             for name in children:
                 child = children[name]
-                childPose = pose * mul[child.name]
+                childPose = _clamp_to_limits(child, float(pose) * float(mul[child.name]))
+                child_force = max(force_floor, float(child.maxForce))
+                child_max_vel = max(1e-3, min(max_vel, float(child.maxVelocity) if float(child.maxVelocity) > 0 else max_vel))
                 p.setJointMotorControl2(robotID, child.id, controlMode, targetPosition=childPose,
-                                        force=child.maxForce, maxVelocity=child.maxVelocity)
+                                        force=child_force, maxVelocity=child_max_vel,
+                                        positionGain=position_gain, velocityGain=velocity_gain)
         else:
             raise NotImplementedError(
                 "controlGripper does not support \"{}\" control mode".format(controlMode))
@@ -154,8 +181,17 @@ def setup_dual_arm_sisbot(p, robotID, gripper_type: str = "140"):
     right_arm_joints = [f"right_{n}" for n in arm_base]
 
     def _make_robotiq_mimic_controller(prefix: str):
+        gripper_debug = str(os.getenv("PB_GRIPPER_DEBUG", "0")).strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+            "",
+        )
         parent_name = prefix + "finger_joint"
         if parent_name not in joints:
+            if gripper_debug:
+                print(f"[gripper] {prefix}: missing parent joint {parent_name} (no gripper control)")
             return None
 
         if gripper_type == "85":
@@ -181,25 +217,126 @@ def setup_dual_arm_sisbot(p, robotID, gripper_type: str = "140"):
             if cname in joints:
                 children.append((joints[cname], mul))
 
+        # Prefer a gear-constraint coupling for mimic joints. This keeps the
+        # gripper kinematics coherent under contact (prevents links "exploding"
+        # or appearing disconnected due to competing motor targets).
+        use_gear = str(os.getenv("PB_GRIPPER_USE_GEAR", "1")).strip().lower() not in ("0", "false", "no", "off")
+        gear_max_force = float(os.getenv("PB_GRIPPER_GEAR_MAX_FORCE", "100000"))
+        gear_erp = float(os.getenv("PB_GRIPPER_GEAR_ERP", "1.0"))
+        gear_cids: list[int] = []
+        if use_gear and children:
+            try:
+                for child, mul in children:
+                    # Disable direct motor control on mimic joints; let the constraint drive them.
+                    try:
+                        p.setJointMotorControl2(robotID, child.id, p.VELOCITY_CONTROL, targetVelocity=0.0, force=0.0)
+                    except Exception:
+                        pass
+
+                    try:
+                        jinfo = p.getJointInfo(robotID, int(child.id))
+                        axis = jinfo[13]
+                    except Exception:
+                        axis = (0.0, 0.0, 1.0)
+
+                    cid = p.createConstraint(
+                        robotID,
+                        int(parent.id),
+                        robotID,
+                        int(child.id),
+                        p.JOINT_GEAR,
+                        axis,
+                        (0.0, 0.0, 0.0),
+                        (0.0, 0.0, 0.0),
+                        (0.0, 0.0, 0.0),
+                        (0.0, 0.0, 0.0),
+                    )
+                    # Negative sign matches the convention used in the original single-arm helper.
+                    # ERP helps keep the coupling tight under heavy contact.
+                    try:
+                        p.changeConstraint(cid, gearRatio=-float(mul), erp=float(gear_erp), maxForce=float(gear_max_force))
+                    except Exception:
+                        p.changeConstraint(cid, gearRatio=-float(mul), maxForce=float(gear_max_force))
+                    gear_cids.append(int(cid))
+            except Exception:
+                # If gear constraints fail for any reason, fall back to motor-based mimic.
+                gear_cids = []
+
+        if gripper_debug:
+            child_desc = ", ".join([f"{c.name}(id={c.id},mul={m})" for c, m in children]) if children else "<none>"
+            print(
+                f"[gripper] {prefix}: parent={parent.name}(id={parent.id}) children={len(children)} "
+                f"use_gear={int(use_gear)} gear_cids={len(gear_cids)} gear_max_force={gear_max_force} gear_erp={gear_erp}"
+            )
+            print(f"[gripper] {prefix}: children: {child_desc}")
+            if use_gear and children and not gear_cids:
+                print(f"[gripper] {prefix}: WARNING gear requested but no constraints created (falling back to motor mimic)")
+            if gear_cids:
+                for cid in gear_cids:
+                    try:
+                        info = p.getConstraintInfo(int(cid))
+                        print(f"[gripper] {prefix}: constraint {cid} info={info}")
+                    except Exception:
+                        print(f"[gripper] {prefix}: constraint {cid} (could not read constraint info)")
+
         def control(target_position: float):
             target_position = float(target_position)
+
+            # Print once on first control call so we can confirm which path is active.
+            nonlocal gripper_debug
+            if gripper_debug:
+                mode = "gear" if gear_cids else "motor_mimic"
+                print(f"[gripper] {prefix}: control() called (mode={mode}, parent_id={parent.id})")
+                gripper_debug = False
+
+            # Default gripper motor tuning: stronger + less compliant.
+            # Uses a force floor because many URDFs have maxForce=0 for finger joints.
+            force_floor = float(os.getenv("PB_GRIPPER_FORCE_N", "1" if gripper_type == "140" else "200"))
+            position_gain = float(os.getenv("PB_GRIPPER_PGAIN", "1.0"))
+            velocity_gain = float(os.getenv("PB_GRIPPER_VGAIN", "1.0"))
+            max_vel = float(os.getenv("PB_GRIPPER_MAX_VEL", "0.75"))
+
+            def _clamp_to_limits(j, q: float) -> float:
+                try:
+                    ll = float(getattr(j, "lowerLimit", 0.0))
+                    ul = float(getattr(j, "upperLimit", -1.0))
+                except Exception:
+                    return float(q)
+                if ul > ll and (ul - ll) < 1e6:
+                    return float(min(max(float(q), ll), ul))
+                return float(q)
+
+            target_position = _clamp_to_limits(parent, target_position)
+
+            parent_force = max(force_floor, float(parent.maxForce))
+            parent_max_vel = max(1e-3, min(max_vel, float(parent.maxVelocity) if float(parent.maxVelocity) > 0 else max_vel))
             p.setJointMotorControl2(
                 robotID,
                 parent.id,
                 p.POSITION_CONTROL,
                 targetPosition=target_position,
-                force=float(parent.maxForce),
-                maxVelocity=float(parent.maxVelocity),
+                force=parent_force,
+                maxVelocity=parent_max_vel,
+                positionGain=position_gain,
+                velocityGain=velocity_gain,
             )
-            for child, mul in children:
-                p.setJointMotorControl2(
-                    robotID,
-                    child.id,
-                    p.POSITION_CONTROL,
-                    targetPosition=float(target_position * mul),
-                    force=float(child.maxForce),
-                    maxVelocity=float(child.maxVelocity),
-                )
+            # If gear constraints are active, they will keep mimic joints in sync.
+            # Otherwise, fall back to motor-based mimic control.
+            if not gear_cids:
+                for child, mul in children:
+                    child_target = _clamp_to_limits(child, float(target_position) * float(mul))
+                    child_force = max(force_floor, float(child.maxForce))
+                    child_max_vel = max(1e-3, min(max_vel, float(child.maxVelocity) if float(child.maxVelocity) > 0 else max_vel))
+                    p.setJointMotorControl2(
+                        robotID,
+                        child.id,
+                        p.POSITION_CONTROL,
+                        targetPosition=child_target,
+                        force=child_force,
+                        maxVelocity=child_max_vel,
+                        positionGain=position_gain,
+                        velocityGain=velocity_gain,
+                    )
 
         return control
 
