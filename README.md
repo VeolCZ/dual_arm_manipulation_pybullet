@@ -1,4 +1,4 @@
-## Coupling between Perception and Manipulation: Learning to Grasp Objects in Highly Cluttered Environments
+## Coupling between Perception and Dual Arm Manipulation: Learning to Grasp Objects in Highly Cluttered Environments
 
 ###### [Hamidreza Kasaei](https://hkasaei.github.io/) | [cognitive robotics course](https://rugcognitiverobotics.github.io/) | [assignment description](https://github.com/SeyedHamidreza/cognitive_robotics_manipulation/blob/main/assignment_description.pdf) | [IRL-Lab](https://www.ai.rug.nl/irl-lab)
 ##
@@ -15,23 +15,22 @@
 # Assignment Overview
 Service robots typically use a perception system to perceive the world. The perception system provides valuable information that the robot has to consider for interacting with users and environments. A robot needs to know how to grasp and manipulate objects in different situations to assist humans in various daily tasks. For instance, consider a robotic task such as clear table. Such tasks consist of two phases: the first one is the perception of the object, and the second phase is dedicated to the planning and execution of the manipulation task. In this assignment, you mainly focus on the topic of deep visual object grasping and manipulation.
 
-The main goal of this assignment is to make a coupling between perception and manipulation using eye-to-hand camera coordination. Towards this goal, we have developed a simulation environment in [PyBullet](https://pybullet.org/wordpress/), where a Universal Robot (UR5e) with a two-fingered Robotiq 2F-140
-gripper perceives the environment through an RGB-D camera. The experimental setup for this assignment is shown in the following figure. This setup is very useful to extensively evaluate different object grasping approaches.
+The main goal of this assignment is to make a coupling between perception and manipulation using eye-to-hand or eye-in-hand camera coordination. Towards this goal, we have developed a simulation environment in [PyBullet](https://pybullet.org/wordpress/), where a dual-arm robot (UR5e) with Robotiq 2F-140 grippers perceives the environment through RGB-D cameras. The experimental setup for this assignment is shown in the following figure. This setup is very useful to extensively evaluate different object grasping approaches.
 
 <p align="center">
   <img src="images/pybullet_setup.png" width="400" title="">
 </p>
 <p align="left">
-  Our experimental setup consists of a table, a basket, a UR5e robotic arm, and objects from YCB dataset. The green rectangle shows the robot's workspace, and the camera indicates the pose of the camera in the environment. Synthesis RGB and depth images, together with a segmentation mask are shown on the left side of the figure.
+  Our experimental setup consists of a table, two baskets, a dual-arm robot, and objects from YCB dataset. The green rectangle shows the robot's workspace, and the camera indicates the pose of the external camera in the environment. 
 </p>
 
 
-***We are pursuing three main goals:*** (i) learning about at least two deep visual grasping approaches, (ii) evaluating and comparing their performances in three scenarios: isolated, packed, and pile (see a video of each scenario above); (iii) investigating the usefulness of formulating object grasping as an object-agnostic problem for general purpose tasks. ***You can also use this setup to develop your final course project***.
+***We are pursuing three main goals:*** (i) learning about at least two deep visual grasping approaches, (ii) evaluating and comparing their performances in three scenarios: isolated, packed, and pile (see a video of each scenario above); (iii) investigating the usefulness of formulating object grasping as an object-agnostic problem for general-purpose tasks. ***You can also use this setup to develop your final course project***.
 
 In this assignment, we capture an RGB-D image of the scene and pass the image to a deep convolutional neural network to obtain pixel-wise grasp configuration in terms of grasp quality, grasp angle, and grasp width. To make it clear, we visualize the output of the GR-ConvNet network for a given image:
 
 <p align="center">
-  <img src="images/network_outputs_2.png" width="400" title="">
+  <img src="images/network_outputs.png" width="400" title="">
 </p>
 <p align="center">
   Outputs of the GR-ConvNet network for a given image
@@ -77,7 +76,7 @@ and then add the following lines at the end of your .bashrc file
 export LC_NUMERIC="en_US.UTF-8"
 ```
 
-close all your terminal and open one.
+Close all your terminals and open one.
 
 ### MacOS ARM instructions (M1/M2/M3)
 For MacOS, please make sure to use Python 3.8. An example using Conda:
@@ -94,7 +93,7 @@ python -m pip install --upgrade pip
 pip install -r requirements-macos.txt
 pip install pybullet
 ```
-It is very important that `pybullet` is build after Numpy is installed. Please check with
+It is very important that `pybullet` is built after Numpy is installed. Please check with
 ```bash
 python -c "import pybullet; print('NumPy enabled:', pybullet.isNumpyEnabled())"
 ```
@@ -119,18 +118,18 @@ We can perform a simulation experiment by running the 'simulation.py' script. As
 
 ```bash
 cd ~/cognitive_robotics_manipulation
-python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=10 --save-network-output=True
+python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=2 --save-network-output=false --stream_cameras=false --device=GPU --gui=true
 ```
 
 
   - Run 'simulation.py --help' to see a full list of options.
     
       - --runs=10 forces the system to run 10 experiments
-      - In the ***environment/env.py*** file, we have provided a parameter namely ***SIMULATION_STEP_DELAY*** to control the speed of the simulator, this parameter should be tuned based on your hardware. 
+      - In the ***environment/env.py*** file, we have provided a parameter, namely ***SIMULATION_STEP_DELAY***, to control the speed of the simulator. This parameter should be tuned based on your hardware. 
        
       - After performing each experiment, a summary of the results will be visualized and saved in the ***results*** folder.
 
-      - Furthermore, you can check the output of the network by setting the ***--save-network-output=True***. The output will be saved into the ***network_output*** folder
+      - Furthermore, you can check the output of the network by setting the ***--save-network-output=True***. The output will be saved in the ***network_output*** folder
 
 ## Integrating a new model 
 
