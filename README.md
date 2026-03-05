@@ -14,9 +14,9 @@
 </p>
 
 # Overview
-Service robots typically use a perception system to perceive the world. The perception system provides valuable information that the robot has to consider for interacting with users and environments. A robot needs to know how to grasp and manipulate objects in different situations to assist humans in various daily tasks. For instance, consider a robotic task such as clear table. Such tasks consist of two phases: the first one is the perception of the object, and the second phase is dedicated to the planning and execution of the manipulation task. In this assignment, you mainly focus on the topic of deep visual object grasping and manipulation.
+Service robots typically use a perception system to perceive the world. The perception system provides valuable information that the robot has to consider for interacting with users and environments. A robot needs to know how to grasp and manipulate objects in different situations to assist humans in various daily tasks. For instance, consider a robotic task such as clearing the table. Such tasks consist of two phases: the first one is the perception of the object, and the second phase is dedicated to the planning and execution of the manipulation task. In this assignment, you mainly focus on the topic of deep visual object grasping and manipulation.
 
-The main goal of this assignment is to make a coupling between perception and manipulation using eye-to-hand or eye-in-hand camera coordination. Towards this goal, we have developed a simulation environment in [PyBullet](https://pybullet.org/wordpress/), where a dual-arm robot (UR5e) with Robotiq 2F-140 grippers perceives the environment through RGB-D cameras. The experimental setup for this assignment is shown in the following figure. This setup is very useful to extensively evaluate different object grasping approaches.
+The main goal of this assignment is to make a coupling between perception and manipulation using eye-to-hand or eye-in-hand camera coordination. To this end, we have developed a simulation environment in [PyBullet](https://pybullet.org/wordpress/), in which a dual-arm robot (UR5e) with Robotiq 2F-140 grippers perceives the environment using RGB-D cameras. The experimental setup for this assignment is shown in the following figure. This setup is very useful to extensively evaluate different object grasping approaches.
 
 <p align="center">
   <img src="images/pybullet_setup.png" width="600" title="">
@@ -37,7 +37,7 @@ In this assignment, we capture an RGB-D image of the scene and pass the image to
   Outputs of the GR-ConvNet network for a given image
 </p>
 
-The best grasp configuration is then selected and then, we convert the grasp pose from pixel space to the robot's workspace (x, y, z, roll, pitch, yaw). We finally instruct the robot to perform a clear table task by grasping and manipulating the target object from the table to the basket. A particular grasp is recorded as a success if the object is inside the basket at the end of the experiment.  An experiment is continued until either all objects get removed from the workspace, or four failures occurred consecutively. Note that, the system automatically reports a summary of the obtained results in the “results” folder, and the prediction of network is visualized and saved in the “network_output” folder.
+The best grasp configuration is then selected, and we convert the grasp pose from pixel space to the robot's workspace (x, y, z, roll, pitch, yaw). We finally instruct the robot to perform a clear table task by grasping and manipulating the target object from the table to the basket. A particular grasp is recorded as a success if the object is inside the basket at the end of the experiment.  An experiment is continued until either all objects get removed from the workspace or five failures occur consecutively. Note that the system automatically reports a summary of the obtained results in the “results” folder, and the prediction of the network is visualized and saved in the “network_output” folder.
 
 
 
@@ -51,8 +51,8 @@ Ensure you are running Python>=3.6.5 and import the required libraries by runnin
 
 ```bash
 cd ~
-git clone https://github.com/SeyedHamidreza/cognitive_robotics_manipulation.git
-cd ~/cognitive_robotics_manipulation
+git clone https://github.com/SeyedHamidreza/dual_arm_manipulation_pybullet.git
+cd ~/dual_arm_manipulation_pybullet
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install --upgrade pip
@@ -60,7 +60,9 @@ pip3 install -r requirements.txt
 ```
 It will install a set of packages, including: numpy, opencv-python-headless, matplotlib, scikit-image, imageio, torch, torchvision, torchsummary, tensorboardX, pyrealsense2, Pillow, pandas, matplotlib, pybullet
 
-#### Dependency notes (NumPy / OpenCV)
+#### Dependency notes (NumPy / OpenCV) 
+```@TODO: double check these points'''
+
 - If you see `A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x` while importing PyBullet, install a NumPy 1.x build (this repo pins `numpy<2` in `requirements.txt`).
 - If you see OpenCV errors like `Could not load the Qt platform plugin "xcb"`, use the headless OpenCV wheel (`opencv-python-headless`) and/or run without GUI windows.
 
