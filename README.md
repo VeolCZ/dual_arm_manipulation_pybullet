@@ -19,7 +19,7 @@ Service robots typically use a perception system to perceive the world. The perc
 The main goal of this assignment is to make a coupling between perception and manipulation using eye-to-hand or eye-in-hand camera coordination. Towards this goal, we have developed a simulation environment in [PyBullet](https://pybullet.org/wordpress/), where a dual-arm robot (UR5e) with Robotiq 2F-140 grippers perceives the environment through RGB-D cameras. The experimental setup for this assignment is shown in the following figure. This setup is very useful to extensively evaluate different object grasping approaches.
 
 <p align="center">
-  <img src="images/pybullet_setup.png" width="400" title="">
+  <img src="images/pybullet_setup.png" width="600" title="">
 </p>
 <p align="left">
   Our experimental setup consists of a table, two baskets, a dual-arm robot, and objects from YCB dataset. The green rectangle shows the robot's workspace, and the camera indicates the pose of the external camera in the environment. 
