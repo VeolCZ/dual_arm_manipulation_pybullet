@@ -1,7 +1,8 @@
 ## Coupling between Perception and Dual Arm Manipulation: Learning to Grasp Objects in Highly Cluttered Environments
 
-###### [Hamidreza Kasaei](https://hkasaei.github.io/) | [cognitive robotics course](https://rugcognitiverobotics.github.io/) | [assignment description](https://github.com/SeyedHamidreza/cognitive_robotics_manipulation/blob/main/assignment_description.pdf) | [IRL-Lab](https://www.ai.rug.nl/irl-lab)
+###### [Hamidreza Kasaei](https://hkasaei.github.io/) | [IRL-Lab](https://www.ai.rug.nl/irl-lab)
 ##
+***NOTE:*** You are not allowed to share this repository and use it in other projects without getting permission from Hamidreza Kasaei (contact: hamidreza.kasaei@rug.nl)
 
 <p align="center">
   <img src="images/isolated.gif" width="250" hight="250" title="">
