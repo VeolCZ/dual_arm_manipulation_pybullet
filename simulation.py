@@ -96,11 +96,13 @@ class GrasppingScenarios:
     def draw_predicted_top_down_grasp(self, grasps, color=(0, 0, 1), lineIDs=None):
         x, y, z, yaw, opening_len, obj_height = grasps
 
+        z += 0.1 # Lift the visualization slightly above the table for better visibility.
+
         if lineIDs is None:
             lineIDs = []
 
         gripper_size = opening_len + 0.02
-        finger_size = 0.075
+        finger_size = 0.12
         lineIDs.append(p.addUserDebugLine([x, y, z], [x, y, z + 0.15], color, lineWidth=6))
 
         lineIDs.append(
