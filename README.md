@@ -13,7 +13,7 @@
    Three scenarios: (left) isolated scenario, (center) packed scenario, and (right) pile scenario.
 </p>
 
-# Assignment Overview
+# Overview
 Service robots typically use a perception system to perceive the world. The perception system provides valuable information that the robot has to consider for interacting with users and environments. A robot needs to know how to grasp and manipulate objects in different situations to assist humans in various daily tasks. For instance, consider a robotic task such as clear table. Such tasks consist of two phases: the first one is the perception of the object, and the second phase is dedicated to the planning and execution of the manipulation task. In this assignment, you mainly focus on the topic of deep visual object grasping and manipulation.
 
 The main goal of this assignment is to make a coupling between perception and manipulation using eye-to-hand or eye-in-hand camera coordination. Towards this goal, we have developed a simulation environment in [PyBullet](https://pybullet.org/wordpress/), where a dual-arm robot (UR5e) with Robotiq 2F-140 grippers perceives the environment through RGB-D cameras. The experimental setup for this assignment is shown in the following figure. This setup is very useful to extensively evaluate different object grasping approaches.
