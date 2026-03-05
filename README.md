@@ -45,7 +45,7 @@ The best grasp configuration is then selected and then, we convert the grasp pos
 
 ### Ubuntu instructions
 
-Tested on Ubuntu 24.04.
+We have tested this repo on Ubuntu 24.04. We expect it to work on 22.04 and 20.04 as well, but we have not yet tested it.  
 
 Ensure you are running Python>=3.6.5 and import the required libraries by running:
 
