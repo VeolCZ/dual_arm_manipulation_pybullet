@@ -717,9 +717,9 @@ def parse_args():
     )
 
     parser.add_argument("--device", type=str, default="cpu", help="device (cpu/gpu)")
-    parser.add_argument("--vis", type=str2bool, default=True, help="vis (True/False)")
+    parser.add_argument("--gui", type=str2bool, default=True, help="GUI (True/False)")
     parser.add_argument("--stream_cameras", type=str2bool, default=True, help="Show/stream camera windows (True/False)")
-    parser.add_argument("--report", type=str2bool, default=True, help="report (True/False)")
+    # parser.add_argument("--report", type=str2bool, default=True, help="report (True/False)")
 
     args = parser.parse_args()
     return args
@@ -730,9 +730,7 @@ if __name__ == "__main__":
     output = args.output
     runs = args.runs
     device = args.device
-    vis = args.vis
-
-    print("visualization = ", vis)
+    vis = args.gui
 
     grasp = GrasppingScenarios(args.network)
     grasp.ATTEMPTS = int(args.attempts)

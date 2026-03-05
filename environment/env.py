@@ -23,7 +23,7 @@ class Environment:
     # placed to the right of the robot.
     TARGET_ZONE_POS = [0.7, 0.0, 0.685]  # left basket (backwards compatible name)
     TARGET_ZONE_POS_RIGHT = [-0.7, 0.0, 0.685]
-    SIMULATION_STEP_DELAY = 0.0005 #speed of simulator - the lower the fatser ## should be a param
+    SIMULATION_STEP_DELAY = 0.00005 #speed of simulator - the lower the fatser ## should be a param
     FINGER_LENGTH = 0.06
     Z_TABLE_TOP = 0.785
     GRIP_REDUCTION = 0.60
