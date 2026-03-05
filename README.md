@@ -64,20 +64,8 @@ It will install a set of packages, including: numpy, opencv-python-headless, mat
 - If you see `A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x` while importing PyBullet, install a NumPy 1.x build (this repo pins `numpy<2` in `requirements.txt`).
 - If you see OpenCV errors like `Could not load the Qt platform plugin "xcb"`, use the headless OpenCV wheel (`opencv-python-headless`) and/or run without GUI windows.
 
-*Note:* On some Ubuntu setups, `pip` may refuse to install into the system Python due to PEP 668 (“externally managed environment”). Using the virtual environment commands above avoids that.
+*Note:* On some Ubuntu setups, `pip` may refuse to install into the system Python due to PEP 668 (“externally managed environment”). Using the virtual environment commands above avoids that, or you can use ```--break-system-packages``` flag
 
-```bash
-cd ~
-gedit .bashrc
-```
-and then add the following lines at the end of your .bashrc file
-
-```sh
-#This line is necessary for MoveIt! and Pybullet, otherwise the robot seems broken
-export LC_NUMERIC="en_US.UTF-8"
-```
-
-Close all your terminals and open one.
 
 ### MacOS ARM instructions (M1/M2/M3)
 For MacOS, please make sure to use Python 3.8. An example using Conda:
