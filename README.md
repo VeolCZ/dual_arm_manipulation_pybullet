@@ -315,7 +315,7 @@ if a process stops before finalizing its metadata.
 
 
 <p align="center">
-  <img src="images/episode.gif" width="400" title="">
+  <img src="images/episode.gif" width="800" title="">
 </p>
 
 
