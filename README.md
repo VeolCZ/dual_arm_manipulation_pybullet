@@ -109,12 +109,49 @@ We can perform a simulation experiment by running the 'simulation.py' script. As
 
 ```bash
 cd ~/cognitive_robotics_manipulation
-python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=2 --save-network-output=false --stream_cameras=false --device=GPU --gui=true
+python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=2
 ```
 
-Select `--network=GR_ConvNet` for the 224 × 224 RGB-D model, or `--network=GGCNN`
-for the 300 × 300 depth-only model. The scenario selects the matching camera and
-checkpoint automatically. For example:
+### Simulation parameters
+
+All command-line options for `simulation.py` are listed below. Omitted options
+use their defaults.
+
+| Parameter | Default | Description and accepted values |
+|---|---|---|
+| `--scenario` | `isolated` | Scene type: `isolated`, `packed`, or `pile`. |
+| `--network` | `GR_ConvNet` | Network selector: `GR_ConvNet` or `GGCNN`. The selected backend must be implemented; see the note below. |
+| `--runs` | `1` | Number of scene rounds. Each isolated run sweeps through every object in the configured object list. |
+| `--attempts` | `4` | Consecutive placement-failure limit per round; a successful placement resets the count. Also sets the number of grasp candidates requested. |
+| `--save-network-output` | `true` | Save network prediction plots in `network_output/`. |
+| `--device` | `GPU` | Inference device: `CPU` or `GPU` (case-insensitive). GPU requests fall back to CPU if CUDA is unavailable. |
+| `--gui` | `true` | Show the PyBullet GUI; `false` uses DIRECT/headless simulation. |
+| `--domain_randomization` | `false` | Randomize table/floor colors, object textures, lighting, and RGB brightness per episode. |
+| `--domain_seed` | `3` | Integer seed for appearance sampling when domain randomization is enabled; does not seed object placement or physics. |
+| `--stream_cameras` | `false` | Show live camera previews. Requires `--gui=true`. |
+| `--stream_backend` | `opencv` | Preview backend: `opencv` or `matplotlib`. |
+| `--stream_async` | `true` | Display OpenCV previews in a separate process. Camera capture remains on the simulation thread; applies to the OpenCV backend. |
+| `--stream_fps` | `5` | Maximum live-preview frames per wall-clock second; must be a finite positive number. |
+| `--stream_which` | Not set (scenario cameras) | Comma-separated preview cameras: `external`, `front`, `head`, `left`, `right`. Isolated defaults to `front,left,right`; packed/pile defaults to all five. |
+| `--record_episodes` | `false` | Save camera episodes for offline playback. Works with or without the PyBullet GUI. |
+| `--record_dir` | `episodes` | Root directory for episode folders. |
+| `--record_fps` | `3` | Recording frames per simulated second; must be finite and greater than `0`, up to `240`. |
+| `--record_which` | `front,external,left,right` | Comma-separated recording cameras: `external`, `front`, `head`, `left`, `right`. |
+| `-h`, `--help` | — | Print usage and available options, then exit. Takes no value. |
+
+Boolean options take an explicit value, for example `--gui=false` or
+`--record_episodes=true`. Both camera-list options use identifiers without spaces,
+for example `--stream_which=front,external`; `external` is displayed as **topdown**.
+
+Override any default by passing its option explicitly. GPU inference falls back
+to CPU when CUDA is unavailable. Recording settings apply when
+`--record_episodes=true`; the appearance seed applies when domain randomization
+is enabled.
+
+Select `--network=GR_ConvNet` for the active 224 × 224 RGB-D baseline.
+The parser also accepts `--network=GGCNN` for a 300 × 300 depth-only backend,
+but its initialization and inference branches are currently commented out.
+Implement or enable those branches before running GGCNN, for example:
 
 ```bash
 python3 simulation.py --scenario=pile --network=GGCNN --runs=1 \
@@ -124,13 +161,14 @@ python3 simulation.py --scenario=pile --network=GGCNN --runs=1 \
 GGCNN receives metric depth with its mean removed, clipped to `[-1, 1]`. Its
 checkpoint encodes widths relative to **150 pixels**; this decoding scale is
 independent of `MAX_GRASP` and differs from GR-ConvNet. Prediction plots are saved
-under `network_output/` when `--save-network-output=true`.
+under `network_output/` by default; use `--save-network-output=false` to disable them.
 
 The PyBullet grasp marker previews a gripper opening capped at `MAX_GRASP`
 (8.5 cm), plus 2 cm total visual padding. Wider network predictions are drawn at
 this limit; the raw predicted widths and saved network plots retain their values.
 
-Camera streaming uses an OpenCV mosaic by default. Your OpenCV build must include GUI
+Camera streaming is off by default. Enable it with `--stream_cameras=true`;
+the default backend displays an OpenCV mosaic. Your OpenCV build must include GUI
 support; if you installed `opencv-python-headless` from `requirements.txt`, use
 `--stream_backend=matplotlib` or replace the headless package with a GUI-enabled
 OpenCV build. Do not install both OpenCV wheel variants in the same environment.
@@ -181,7 +219,7 @@ RGB brightness:
 ```bash
 python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=2 \
   --domain_randomization=true --domain_seed=42 \
-  --record_episodes=true --record_fps=5 --stream_cameras=false --gui=false
+  --record_episodes=true --record_fps=3 --stream_cameras=false --gui=false
 ```
 
 Domain randomization is disabled by default. Settings are sampled once per pile
@@ -211,7 +249,7 @@ brightness multiplier is applied to captured images rather than the GUI viewport
 Depth, segmentation, camera poses/FOV, object geometry, and physics retain their
 existing settings. GGCNN consumes depth, so this mode does not alter its input.
 
-`--domain_seed` controls appearance sampling only; object-placement randomness
+`--domain_seed` defaults to `3` and controls appearance sampling only; object-placement randomness
 is independent. Recordings save the episode seed, sampled settings, and object
 texture choices under `scenario_metadata.domain_randomization` in `episode.json`.
 
@@ -282,15 +320,15 @@ live camera windows:
 ```bash
 python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=2 \
   --save-network-output=false --record_episodes=true --record_dir=episodes \
-  --record_fps=5 --record_which=external,front,left,right \
+  --record_fps=3 --record_which=front,external,left,right \
   --stream_cameras=false --device=CPU --gui=true
 ```
 
-Recording is off by default. When `--record_episodes=true` is set, camera streaming
-defaults to off unless you explicitly pass `--stream_cameras=true`. The PyBullet GUI
+Recording and camera streaming are off by default. Enable them independently with
+`--record_episodes=true` and `--stream_cameras=true`. The PyBullet GUI
 is controlled separately by `--gui`; recording also works in DIRECT/headless mode.
 
-By default, recordings include the topdown, front, left wrist, and right wrist views.
+By default, recordings include the front, topdown, left wrist, and right wrist views.
 Select views using the camera identifiers below. The overhead view is displayed as
 **`topdown`** in both live previews and the episode viewer; its identifier remains
 `external` in command options, saved folders, and metadata, including existing episodes.
@@ -321,7 +359,7 @@ episodes/episode_<timestamp>_<id>/
   right/000000.png
 ```
 
-`--record_fps` is measured in **simulation time**, using the 240 Hz physics step.
+`--record_fps` defaults to **3 frames per simulated second**, using the 240 Hz physics step.
 Playback omits wall-clock delays such as network inference. Camera capture still
 takes time during recording; reduce the FPS or select fewer cameras for less
 overhead. PNG encoding and file writes run in a background thread with a bounded
@@ -381,7 +419,7 @@ python3 view_episodes.py episodes --verify
        
       - After performing each experiment, a summary of the results will be visualized and saved in the ***results*** folder.
 
-      - Furthermore, you can check the output of the network by setting the ***--save-network-output=True***. The output will be saved in the ***network_output*** folder
+      - Network predictions are saved in ***network_output*** by default. Use ***--save-network-output=false*** to disable saving.
 
 ## Integrating a new model 
 

@@ -59,10 +59,10 @@ class GrasppingScenarios:
         self.stream_which = None
         self.record_episodes = False
         self.record_dir = "episodes"
-        self.record_fps = 5.0
-        self.record_which = ("external", "front", "left", "right")
+        self.record_fps = 3.0
+        self.record_which = ("front", "external", "left", "right")
         self.domain_randomization = False
-        self.domain_seed = None
+        self.domain_seed = 3
         self._env = None
 
         # Offscreen figure for optional network visualisations (avoids opening a GUI window).
@@ -753,28 +753,26 @@ def parse_args():
         "--save-network-output",
         dest="output",
         type=str2bool,
-        default=False,
-        help="Save network output (True/False)",
+        default=True,
+        help="Save network output (default: true)",
     )
 
-    parser.add_argument("--device", type=str, default="cpu", help="device (cpu/gpu)")
+    parser.add_argument("--device", type=str, default="GPU", help="device (CPU/GPU; default: GPU)")
     parser.add_argument("--gui", type=str2bool, default=True, help="GUI (True/False)")
     parser.add_argument("--domain_randomization", type=str2bool, default=False, help="Randomize only table/floor colors, object textures, lighting and RGB brightness per episode")
-    parser.add_argument("--domain_seed", type=int, default=None, help="Seed for episode appearance (does not seed object placement or physics)")
-    parser.add_argument("--stream_cameras", type=str2bool, default=None, help="Show camera windows (default: true, or false when recording episodes)")
+    parser.add_argument("--domain_seed", type=int, default=3, help="Seed for episode appearance (default: 3; does not seed object placement or physics)")
+    parser.add_argument("--stream_cameras", type=str2bool, default=False, help="Show camera windows (default: false)")
     parser.add_argument("--stream_backend", choices=("opencv", "matplotlib"), default="opencv", help="Camera viewer backend (default: opencv)")
     parser.add_argument("--stream_async", type=str2bool, default=True, help="Display OpenCV cameras in a separate process (default: true; capture still uses the simulation thread)")
     parser.add_argument("--stream_fps", type=float, default=5.0, help="Maximum camera preview FPS (lower values leave more time for physics)")
     parser.add_argument("--stream_which", type=str, default=None, help="Comma-separated preview cameras: external,front,head,left,right (default: scenario cameras)")
     parser.add_argument("--record_episodes", type=str2bool, default=False, help="Save camera episodes for offline playback")
     parser.add_argument("--record_dir", default="episodes", help="Root folder for recorded episodes")
-    parser.add_argument("--record_fps", type=float, default=5.0, help="Recording frames per simulated second (default: 5; camera capture adds cost)")
-    parser.add_argument("--record_which", default="external,front,left,right", help="Comma-separated recording cameras: external,front,head,left,right")
+    parser.add_argument("--record_fps", type=float, default=3.0, help="Recording frames per simulated second (default: 3; camera capture adds cost)")
+    parser.add_argument("--record_which", default="front,external,left,right", help="Comma-separated recording cameras (default: front,external,left,right; head is also available)")
     # parser.add_argument("--report", type=str2bool, default=True, help="report (True/False)")
 
     args = parser.parse_args()
-    if args.stream_cameras is None:
-        args.stream_cameras = not args.record_episodes
     if not math.isfinite(args.record_fps) or not 0 < args.record_fps <= 240:
         parser.error("--record_fps must be positive and no greater than 240")
     args.record_which = tuple(name.strip().lower() for name in args.record_which.split(","))
