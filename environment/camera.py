@@ -1,24 +1,36 @@
 import os
 from datetime import datetime
 
+import numpy as np
 import pybullet as p
 
 
+def _rgb_with_brightness(rgba, brightness):
+    """Scale rendered RGB without modifying the source alpha, depth, or labels."""
+    rgb = rgba[:, :, 0:3]
+    if brightness == 1.0:
+        return rgb
+    return np.clip(rgb.astype(np.float32) * brightness, 0, 255).astype(np.uint8)
+
+
 class Camera:
-    def __init__(self, cam_pos, cam_target, near, far, size, fov):
+    def __init__(self, cam_pos, cam_target, near, far, size, fov, up_vector=(0, 1, 0)):
         self.x, self.y, self.z = cam_pos
         self.x_t, self.y_t, self.z_t = cam_target
         self.width, self.height = size
         self.near, self.far = near, far
         self.fov = fov
+        self.up_vector = tuple(up_vector)
 
         aspect = self.width / self.height
         self.projection_matrix = p.computeProjectionMatrixFOV(fov, aspect, near, far)
-        self.view_matrix = p.computeViewMatrix(cam_pos, cam_target, [0, 1, 0])
+        self.view_matrix = p.computeViewMatrix(cam_pos, cam_target, self.up_vector)
 
         self.rec_id = None
         # Optional default renderer for getCameraImage (set by Environment).
         self.default_renderer = None
+        self.render_options = {}
+        self.rgb_brightness = 1.0
 
     def get_cam_img(
         self,
@@ -33,7 +45,7 @@ class Camera:
 
         if renderer is None:
             renderer = getattr(self, "default_renderer", None)
-        renderer_kw = {}
+        renderer_kw = dict(self.render_options)
         if renderer is not None:
             renderer_kw["renderer"] = renderer
 
@@ -55,7 +67,7 @@ class Camera:
                 **renderer_kw,
             )
 
-        rgb_out = rgb[:, :, 0:3]
+        rgb_out = _rgb_with_brightness(rgb, self.rgb_brightness)
         depth_out = depth if bool(return_depth) else None
         seg_out = seg if bool(return_seg) else None
         return rgb_out, depth_out, seg_out
@@ -109,6 +121,8 @@ class LinkCamera:
         self.eye_offset = float(eye_offset)
         # Optional default renderer for getCameraImage (set by Environment).
         self.default_renderer = None
+        self.render_options = {}
+        self.rgb_brightness = 1.0
 
     @staticmethod
     def _rotate_vec(quat_xyzw, v):
@@ -171,7 +185,7 @@ class LinkCamera:
         if not bool(return_seg):
             flags = getattr(p, "ER_NO_SEGMENTATION_MASK", None)
 
-        renderer_kw = {}
+        renderer_kw = dict(self.render_options)
         if renderer is not None:
             renderer_kw["renderer"] = renderer
 
@@ -193,7 +207,7 @@ class LinkCamera:
                 **renderer_kw,
             )
 
-        rgb_out = rgb[:, :, 0:3]
+        rgb_out = _rgb_with_brightness(rgb, self.rgb_brightness)
         depth_out = depth if bool(return_depth) else None
         seg_out = seg if bool(return_seg) else None
         return rgb_out, depth_out, seg_out

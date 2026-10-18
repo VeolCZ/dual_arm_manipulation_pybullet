@@ -37,7 +37,7 @@ In this assignment, we capture an RGB-D image of the scene and pass the image to
   Outputs of the GR-ConvNet network for a given image
 </p>
 
-The best grasp configuration is then selected, and we convert the grasp pose from pixel space to the robot's workspace (x, y, z, roll, pitch, yaw). We finally instruct the robot to perform a clear table task by grasping and manipulating the target object from the table to the basket. A particular grasp is recorded as a success if the object is inside the basket at the end of the experiment.  An experiment is continued until either all objects get removed from the workspace or five failures occur consecutively. Note that the system automatically reports a summary of the obtained results in the “results” folder, and the prediction of the network is visualized and saved in the “network_output” folder.
+The best grasp configuration is then selected, and we convert the grasp pose from pixel space to the robot's workspace (x, y, z, roll, pitch, yaw). We finally instruct the robot to perform a clear table task by grasping and manipulating the target object from the table to the basket. A particular grasp is recorded as a success if the object is inside the basket at the end of the experiment.  An experiment is continued until either all objects get removed from the workspace or four failures occur consecutively (the default is `--attempts=4`). Note that the system automatically reports a summary of the obtained results in the “results” folder, and the prediction of the network is visualized and saved in the “network_output” folder.
 
 
 
@@ -110,6 +110,267 @@ We can perform a simulation experiment by running the 'simulation.py' script. As
 ```bash
 cd ~/cognitive_robotics_manipulation
 python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=2 --save-network-output=false --stream_cameras=false --device=GPU --gui=true
+```
+
+Select `--network=GR_ConvNet` for the 224 × 224 RGB-D model, or `--network=GGCNN`
+for the 300 × 300 depth-only model. The scenario selects the matching camera and
+checkpoint automatically. For example:
+
+```bash
+python3 simulation.py --scenario=pile --network=GGCNN --runs=1 \
+  --gui=false --stream_cameras=false --device=GPU --save-network-output=true
+```
+
+GGCNN receives metric depth with its mean removed, clipped to `[-1, 1]`. Its
+checkpoint encodes widths relative to **150 pixels**; this decoding scale is
+independent of `MAX_GRASP` and differs from GR-ConvNet. Prediction plots are saved
+under `network_output/` when `--save-network-output=true`.
+
+The PyBullet grasp marker previews a gripper opening capped at `MAX_GRASP`
+(8.5 cm), plus 2 cm total visual padding. Wider network predictions are drawn at
+this limit; the raw predicted widths and saved network plots retain their values.
+
+Camera streaming uses an OpenCV mosaic by default. Your OpenCV build must include GUI
+support; if you installed `opencv-python-headless` from `requirements.txt`, use
+`--stream_backend=matplotlib` or replace the headless package with a GUI-enabled
+OpenCV build. Do not install both OpenCV wheel variants in the same environment.
+
+```bash
+python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=2 --save-network-output=false --stream_cameras=true --stream_backend=opencv --device=CPU --gui=true
+```
+
+OpenCV displays the preview in a separate process by default (`--stream_async=true`).
+The worker builds the mosaic and handles window events; a queue holds at most one
+pending frame and drops old frames when display falls behind. Qt window calls stay
+on the display process's main thread. Use `--stream_async=false` for display in the
+simulation process. This option applies to the OpenCV backend.
+
+The `front` camera renders and records at **640 × 640 pixels** by default. The
+topdown, head, and wrist cameras match the selected network input: **224 × 224**
+for GR-ConvNet or **300 × 300** for GGCNN.
+Live OpenCV mosaics fit the images into tiles matching the smallest selected camera;
+this affects display only. With GR-ConvNet, the mosaic uses 224-pixel tiles:
+four tiles (**448 × 448**) or six (**672 × 448**) when all five cameras are selected,
+including blanks for unused slots. Recorded PNGs keep each camera's native resolution.
+
+The fixed `front` camera observes the robot from in front of the worktable, framing
+the head, both arms, both baskets, and the workspace. It is separate from `external`,
+the overhead camera used for grasp prediction. Its position, target, and field of
+view are set by `FRONT_CAMERA_POS`, `FRONT_CAMERA_TARGET`, and `FRONT_CAMERA_FOV` in
+`environment/env.py`; `FRONT_CAMERA_SIZE` sets its independent capture resolution. Select it alone
+with `--stream_which=front`, or include it in any camera list. New recordings include
+it by default; existing recordings still play as before.
+
+Each preview frame still captures the selected cameras on the simulation thread;
+moving display to a worker does not remove PyBullet rendering time. For a
+lighter preview, add `--stream_fps=2 --stream_which=external`. To see both wrist
+cameras, use `--stream_which=left,right`. The default limit is 5 FPS; the selected
+cameras otherwise follow the scenario defaults. Press `q` or Escape in the OpenCV
+window to stop streaming while the simulation continues.
+
+### Domain randomization
+
+<p align="center">
+  <img src="images/domain_randomization.png" width="400" title="">
+</p>
+
+
+Enable per-episode changes to table/floor colors, object textures, lighting, and
+RGB brightness:
+
+```bash
+python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=2 \
+  --domain_randomization=true --domain_seed=42 \
+  --record_episodes=true --record_fps=5 --stream_cameras=false --gui=false
+```
+
+Domain randomization is disabled by default. Settings are sampled once per pile
+or packed run, or once per isolated-object episode, and stay fixed throughout
+that episode.
+
+The main worktable, both basket platforms, and the stand under the robot share
+one sampled table color across all their visual links.
+
+| Setting | Range |
+|---|---|
+| Table RGB channels | `0.30–0.95` |
+| Floor RGB channels | `0.20–0.55` |
+| Object textures | Original 30% of the time; otherwise HSV variants with hue ±12°, saturation `0.75–1.25×`, value `0.8–1.2×` |
+| Lighting | Yaw ±45°, elevation `40–70°`, with shadows |
+| RGB brightness | `0.6–1.4×` |
+
+Textures are generated lazily from each object's original image and cached (up
+to eight variants per source) in a temporary directory. Original asset files are
+preserved, and cached isolated objects receive a fresh texture choice each
+episode. Objects without a discoverable texture retain their appearance.
+
+All five camera views share the episode's lighting and brightness settings, so
+inference, live previews, saved predictions, and recordings use the same image
+processing. Colors, textures, and lighting also affect the PyBullet GUI; the RGB
+brightness multiplier is applied to captured images rather than the GUI viewport.
+Depth, segmentation, camera poses/FOV, object geometry, and physics retain their
+existing settings. GGCNN consumes depth, so this mode does not alter its input.
+
+`--domain_seed` controls appearance sampling only; object-placement randomness
+is independent. Recordings save the episode seed, sampled settings, and object
+texture choices under `scenario_metadata.domain_randomization` in `episode.json`.
+
+### Check all robot behaviors
+
+`test_behaviours.py` checks every registered common behavior and every left, right,
+and dual-arm variant by default:
+
+```bash
+python3 test_behaviours.py
+```
+
+For a faster run without GUI rendering or pauses between checks:
+
+```bash
+python3 test_behaviours.py --vis=false --sleep=0
+```
+
+Each check reports `PASS`, `FAIL`, or `SKIP`, followed by a summary. Failures return
+exit code 1, and remaining checks continue after a failure. Checks verify actual
+joint positions, IK position/orientation errors, gripper movement, object poses,
+camera buffers and saved images, and EE marker movement. Throwing and speech are
+reported as skipped because they are stubs. Headless runs also skip trajectory
+line rendering after checking the trajectory points; marker bodies are checked
+in both modes. Closing an empty gripper is checked by finger movement, since its
+return value indicates object contact rather than movement success.
+
+Use `--robot=left`, `--robot=right`, or `--robot=dual` to check one variant plus the
+common behaviors. Camera files are verified in a temporary directory and removed
+afterward; add `--output-dir=results/behavior_checks` to keep them. Interactive
+commands remain available with `--interactive=true` (the default robot is `dual`
+in interactive mode).
+
+`visualize_target_ee_pose` places a static marker at the desired **tool0 pose in
+world coordinates**. Its mesh origin is at the gripper mount, with no fingertip/TCP
+offset. Pass the same quaternion used for IK so the marker shows the intended
+orientation; omitting it uses identity (the fingers point along world +Z). Dual
+calls accept a shared `orientation_xyzw` and per-arm overrides. The behavior
+checker supplies each arm's top-down IK orientation. To follow the robot's actual
+tool0 pose continuously, use `enable_eef_mesh_debug`.
+
+### Object contact settings
+
+Objects use a lateral friction coefficient of `0.6`, rolling/spinning friction of
+`0.005`, and disabled friction anchoring. The gripper pads keep their higher lateral
+friction (`2.5`) so the fingers can hold objects while neighbouring objects can slide
+and separate. These settings apply when objects are loaded or reused; restart the
+simulation to apply changed defaults to a new run.
+
+The previous object coefficient of `2.5` produced an object-object coefficient of
+`6.25`, because [Bullet multiplies the two surface coefficients](https://github.com/bulletphysics/bullet3/blob/master/src/BulletCollision/CollisionDispatch/btManifoldResult.cpp).
+Together with anchored friction, those settings reproduced a lifted object carrying
+a neighbouring object suspended beneath it in the pile-and-lift regression test.
+
+Optional environment overrides:
+
+| Variable | Default |
+|---|---|
+| `PB_OBJECT_LATERAL_FRICTION` | `0.6` |
+| `PB_OBJECT_ROLLING_FRICTION` | `0.005` |
+| `PB_OBJECT_SPINNING_FRICTION` | `0.005` |
+
+### Record episodes and review them later
+
+Run these commands from the repository root. Record camera images without opening
+live camera windows:
+
+```bash
+python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=2 \
+  --save-network-output=false --record_episodes=true --record_dir=episodes \
+  --record_fps=5 --record_which=external,front,left,right \
+  --stream_cameras=false --device=CPU --gui=true
+```
+
+Recording is off by default. When `--record_episodes=true` is set, camera streaming
+defaults to off unless you explicitly pass `--stream_cameras=true`. The PyBullet GUI
+is controlled separately by `--gui`; recording also works in DIRECT/headless mode.
+
+By default, recordings include the topdown, front, left wrist, and right wrist views.
+Select views using the camera identifiers below. The overhead view is displayed as
+**`topdown`** in both live previews and the episode viewer; its identifier remains
+`external` in command options, saved folders, and metadata, including existing episodes.
+
+| Camera identifier | Display label | View |
+|---|---|---|
+| `external` | `topdown` | Overhead camera used for grasp prediction |
+| `front` | `front` | Fixed frontal view of the robot and table |
+| `left` | `left` | Left wrist camera |
+| `right` | `right` | Right wrist camera |
+| `head` | `head` | Robot head camera; optional |
+
+For example, `--record_which=external,front` records just the topdown and front views.
+
+Each pile/packed run creates one episode after object spawning. The isolated
+scenario creates an episode for each object in each run. Frames retain their
+original camera resolution: **640 × 640 RGB for front**, **224 × 224 RGB for the
+other cameras**. This applies to new recordings; older episodes retain their saved
+resolution. Each episode contains:
+
+```text
+episodes/episode_<timestamp>_<id>/
+  episode.json          # cameras, sizes, FPS, scenario/run, recording status
+  frames.jsonl          # frame timestamps and image paths
+  external/000000.png   # topdown view; lossless PNG frames numbered per camera
+  front/000000.png      # 640 × 640 fixed view of robot behavior and the table
+  left/000000.png
+  right/000000.png
+```
+
+`--record_fps` is measured in **simulation time**, using the 240 Hz physics step.
+Playback omits wall-clock delays such as network inference. Camera capture still
+takes time during recording; reduce the FPS or select fewer cameras for less
+overhead. PNG encoding and file writes run in a background thread with a bounded
+eight-frame queue. If the disk falls behind, frames are dropped and counted in
+`episode.json`; the viewer preserves gaps using the recorded timestamps. Episode
+status describes whether recording completed, not whether grasping succeeded.
+Ctrl+C finalizes an interrupted episode. Complete indexed frames can also be read
+if a process stops before finalizing its metadata.
+
+View **only one specific episode** by passing its complete folder path:
+
+```bash
+python3 view_episodes.py episodes/episode_20261017T151129389913Z_1f48b3 --speed=1 --size=320
+```
+
+Replace the example folder name with the episode you want to open. The recorder
+prints that path when it starts and saves an episode. Passing `episode.json` inside
+the episode folder also works.
+
+To browse **all episodes** under the output directory instead, pass the parent folder:
+
+```bash
+python3 view_episodes.py episodes --speed=1 --size=320
+```
+
+`--speed` needs a number: `1` plays at normal simulation speed, `0.5` at half speed,
+and `2` at double speed. For example, `--speed=0.5` slows playback down; do not leave
+the value empty after `--speed=`.
+
+The viewer reads saved PNGs and metadata without loading PyBullet or the network.
+It displays the selected cameras side by side; `--size` changes display size only.
+Playback needs a GUI-enabled OpenCV build. No additional Python packages are needed
+for the recording format. Controls:
+
+| Key | Action |
+|---|---|
+| Space | Pause/resume; restart at the end |
+| A/D or left/right arrow | Step backward/forward and pause |
+| R | Restart the current episode |
+| `[` / `]` | Previous/next episode |
+| Q, Escape, or Ctrl+C | Quit; Ctrl+C also works from the terminal |
+
+Paused playback and the final frame remain responsive to Ctrl+C and window-close
+events. The viewer closes its windows when interrupted.
+
+Verify saved images and metadata without opening a window:
+
+```bash
+python3 view_episodes.py episodes --verify
 ```
 
 

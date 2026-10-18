@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import argparse
 import ast
+from dataclasses import dataclass
+import math
+from pathlib import Path
 import shlex
+from tempfile import TemporaryDirectory
 import time
 from typing import Literal
+
+import numpy as np
+from PIL import Image
+import pybullet as pb
 
 from environment.utilities import Camera
 from environment.env import Environment
@@ -29,18 +37,22 @@ def _str2bool(v):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Quick manual test for Behaviors (PyBullet)")
+    p = argparse.ArgumentParser(description="Check all registered Behaviors in PyBullet")
     p.add_argument("--vis", type=_str2bool, default=True, help="Show PyBullet GUI (True/False)")
     p.add_argument("--debug", type=_str2bool, default=False, help="Enable Environment debug (True/False)")
-    p.add_argument("--robot", type=str, default="dual", choices=("left", "right", "dual"), help="Which robot to test")
+    p.add_argument("--robot", type=str, default="all", choices=("all", "left", "right", "dual"), help="Behavior variants to check (default: all)")
     p.add_argument("--sleep", type=float, default=0.25, help="Sleep seconds between actions (GUI readability)")
+    p.add_argument("--output-dir", type=Path, default=None, help="Keep camera check files here (default: temporary files)")
     p.add_argument(
         "--interactive",
         type=_str2bool,
         default=False,
         help="Interactive mode: type behaviors in terminal and execute only that behavior",
     )
-    return p.parse_args()
+    args = p.parse_args()
+    if not math.isfinite(args.sleep) or args.sleep < 0:
+        p.error("--sleep must be a finite nonnegative number")
+    return args
 
 
 def _parse_value(raw: str):
@@ -206,116 +218,340 @@ def _safe_target_xyz(env: Environment, robot: RobotSelector):
     return x, y, z
 
 
+class SkipBehavior(Exception):
+    """A registered behavior cannot be verified in the current configuration."""
+
+
+@dataclass(frozen=True)
+class BehaviorCheckResult:
+    name: str
+    robot: str
+    status: str
+    detail: str
+    duration_s: float
+
+
+def _require(condition, message):
+    if not condition:
+        raise AssertionError(message)
+
+
+class BehaviorCheckRunner:
+    def __init__(self, behaviors: Behaviors, output_dir: Path):
+        self.beh = behaviors
+        self.env = behaviors.env
+        self.output_dir = Path(output_dir)
+        self._object_id = None
+
+    def close(self):
+        if self._object_id is not None:
+            pb.removeBody(self._object_id)
+            self._object_id = None
+
+    def _call(self, name, robot, **kwargs):
+        return self.beh.run(name, robot=robot, **kwargs)
+
+    @staticmethod
+    def _arms(robot):
+        return ('left', 'right') if robot == 'dual' else (robot,)
+
+    def _object(self):
+        if self._object_id is None:
+            shape = pb.createCollisionShape(pb.GEOM_BOX, halfExtents=(0.015, 0.015, 0.015))
+            self._object_id = pb.createMultiBody(
+                baseMass=0, baseCollisionShapeIndex=shape,
+                basePosition=(0.4, -0.65, 0.9),
+            )
+        return self._object_id
+
+    def _check_joints(self, robot, expected, tolerance=0.02):
+        actual = np.asarray(self.beh.read_all_joints(robot), dtype=float)
+        expected = np.asarray(expected, dtype=float)
+        _require(actual.shape == expected.shape, 'Joint vector has the wrong length')
+        _require(np.isfinite(actual).all(), 'Non-finite joint state')
+        error = float(np.max(np.abs(actual - expected)))
+        _require(error <= tolerance, f'Maximum joint error {error:.5f} rad exceeds {tolerance} rad')
+        return f'max joint error {error:.5f} rad'
+
+    def _validate_camera(self, frames, camera_name):
+        rgb, depth, seg = frames
+        camera_attr = {'external': 'camera', 'head': 'head_camera',
+                       'left_arm': 'left_arm_camera', 'right_arm': 'right_arm_camera'}[camera_name]
+        camera = getattr(self.env, camera_attr)
+        shape = (camera.height, camera.width)
+        rgb, depth, seg = np.asarray(rgb), np.asarray(depth), np.asarray(seg)
+        _require(rgb.shape == (*shape, 3), f'RGB shape {rgb.shape}; expected {(*shape, 3)}')
+        _require(rgb.dtype == np.uint8, f'RGB dtype is {rgb.dtype}, expected uint8')
+        _require(depth.shape == shape, f'Depth shape {depth.shape}; expected {shape}')
+        _require(np.isfinite(depth).all(), 'Depth contains non-finite values')
+        _require(np.all((depth >= 0) & (depth <= 1)), 'Depth buffer is outside [0, 1]')
+        _require(seg.shape == shape, f'Segmentation shape {seg.shape}; expected {shape}')
+        _require(np.issubdtype(seg.dtype, np.integer), 'Segmentation is not an integer buffer')
+        return f'{shape[1]}x{shape[0]} RGB, depth and segmentation'
+
+    def _check_camera(self, name, robot):
+        camera_name = name.removeprefix('get_').removeprefix('save_').removesuffix('_cam_img')
+        if name.startswith('get_'):
+            return self._validate_camera(
+                self._call(name, robot, return_depth=True, return_seg=True), camera_name
+            )
+        paths = self._call(name, robot, out_dir=str(self.output_dir),
+                           return_depth=True, return_seg=True)
+        _require(set(paths) == {'rgb_png', 'depth_npy', 'seg_npy'}, 'Missing saved camera outputs')
+        for filename in paths.values():
+            _require(Path(filename).is_file(), f'Missing camera file: {filename}')
+        with Image.open(paths['rgb_png']) as image:
+            rgb = np.asarray(image)
+        depth = np.load(paths['depth_npy'], allow_pickle=False)
+        seg = np.load(paths['seg_npy'], allow_pickle=False)
+        return self._validate_camera((rgb, depth, seg), camera_name) + '; saved files reopened'
+
+    def _check_ik(self, name, robot):
+        targets = {arm: _safe_target_xyz(self.env, arm) for arm in self._arms(robot)}
+        if name == 'IK_move_to_pose_real_time':
+            # Exercise another movement instead of checking the previous target again.
+            targets = {arm: (x, y, min(z + 0.025, self.env.ee_position_limit[2][1]))
+                       for arm, (x, y, z) in targets.items()}
+        kwargs = dict(position_xyz=next(iter(targets.values())), yaw=0.0, max_step=1000)
+        if robot == 'dual':
+            kwargs.update(left_position_xyz=targets['left'], right_position_xyz=targets['right'])
+        ok, _ = self._call(name, robot, **kwargs)
+        _require(ok, 'IK did not converge within 1000 iterations')
+        poses = self.beh.read_current_ee_pose(robot)
+        if robot != 'dual':
+            poses = {robot: poses}
+        errors = []
+        for arm, target in targets.items():
+            pose = poses[arm]
+            position_error = float(np.linalg.norm(np.asarray(pose['position']) - target))
+            self.env.set_active_arm(arm)
+            target_orn = np.asarray(self.env._tool0_quat_from_grasp_yaw(0.0))
+            actual_orn = np.asarray(pose['orientation_xyzw'])
+            angular_error = 2 * math.acos(float(np.clip(abs(np.dot(actual_orn, target_orn)), 0, 1)))
+            _require(position_error <= 0.005, f'{arm} position error {position_error * 1000:.3f} mm exceeds 5 mm')
+            _require(angular_error <= 0.02, f'{arm} orientation error {angular_error:.4f} rad exceeds 0.02 rad')
+            errors.append(f'{arm} {position_error * 1000:.3f} mm')
+        return ', '.join(errors)
+
+    def _opening(self, arm):
+        joint = self.env.joints[self.env.mimicParentName_by_arm[arm]]
+        angle = pb.getJointState(self.env.robot_id, joint.id)[0]
+        return math.sin(0.715 - angle) * 0.1143 + 0.010
+
+    def _check_gripper(self, name, robot):
+        if name == 'close_gripper':
+            self.beh.open_gripper(robot)
+            before = {arm: self._opening(arm) for arm in self._arms(robot)}
+            # False means no object contact; this fixture intentionally has none.
+            self._call(name, robot, check_contact=False)
+            for arm, opening in before.items():
+                _require(self._opening(arm) < opening - 0.015, f'{arm} gripper did not close')
+            return 'fingers closed; no object-contact success expected'
+        expected = 0.04 if name == 'partially_open_gripper' else 0.085
+        if name == 'open_gripper':
+            self.beh.partially_open_gripper(robot, opening_length=0.04)
+        else:
+            self.beh.open_gripper(robot)
+        before = {arm: self._opening(arm) for arm in self._arms(robot)}
+        self._call(name, robot, opening_length=expected)
+        for arm in self._arms(robot):
+            actual = self._opening(arm)
+            _require(abs(actual - expected) < 0.003,
+                     f'{arm} opening {actual:.5f} m did not reach {expected} m')
+            _require(abs(actual - before[arm]) > 0.02, f'{arm} fingers did not move')
+        return f'opening {expected:.3f} m verified'
+
+    def _check_visualization(self, name, robot):
+        arms = self._arms(robot)
+        if name == 'enable_eef_mesh_debug':
+            original = self.beh.read_all_joints(robot)
+            before = {arm: pb.getLinkState(self.env.robot_id, self.beh._eef_link_id(arm))[4]
+                      for arm in arms}
+            constraints = pb.getNumConstraints()
+            try:
+                self._call(name, robot, enabled=True)
+                target = list(original)
+                for index in range(0, len(target), 6):
+                    target[index] += 0.03
+                self.beh.set_all_joints(robot, target, steps=600)
+                for arm in arms:
+                    uid = self.env._eef_mesh_debug_body_uid[arm]
+                    _require(pb.getVisualShapeData(uid), f'No {arm} EE marker visual shape')
+                    marker_pos, marker_orn = pb.getBasePositionAndOrientation(uid)
+                    state = pb.getLinkState(self.env.robot_id, self.beh._eef_link_id(arm))
+                    _require(np.linalg.norm(np.asarray(state[4]) - before[arm]) > 0.003,
+                             f'{arm} arm could not move with the EE marker enabled')
+                    _require(np.allclose(marker_pos, state[4], atol=1e-5) and
+                             np.allclose(marker_orn, state[5], atol=1e-5),
+                             f'{arm} EE marker did not follow the tool')
+                _require(pb.getNumConstraints() == constraints, 'EE markers added physics constraints')
+            finally:
+                self.beh.enable_eef_mesh_debug(robot, enabled=False)
+                self.beh.set_all_joints(robot, original, steps=600)
+            return 'EE markers follow moving arms without adding constraints'
+        if name == 'clear_ee_trajectory':
+            self._call(name, robot)
+            _require(all(not self.beh._ee_traj_points[arm] for arm in arms), 'Trajectory points were not cleared')
+            _require(all(not self.beh._ee_traj_debug_ids[arm] for arm in arms), 'Trajectory drawing IDs were not cleared')
+            return 'trajectory points and drawing IDs cleared'
+        targets = {arm: _safe_target_xyz(self.env, arm) for arm in arms}
+        kwargs = dict(position_xyz=next(iter(targets.values())))
+        if robot == 'dual':
+            kwargs.update(left_position_xyz=targets['left'], right_position_xyz=targets['right'])
+        if name == 'visualize_target_ee_pose':
+            orientations = {}
+            for arm in arms:
+                self.env.set_active_arm(arm)
+                orientations[arm] = self.env._tool0_quat_from_grasp_yaw(0.0)
+            if robot == 'dual':
+                kwargs.update(left_orientation_xyzw=orientations['left'],
+                              right_orientation_xyzw=orientations['right'])
+            else:
+                kwargs['orientation_xyzw'] = orientations[robot]
+            self._call(name, robot, **kwargs)
+            for arm in arms:
+                uid = self.beh._ee_target_mesh_uid[arm]
+                actual, orientation = pb.getBasePositionAndOrientation(uid)
+                _require(np.allclose(actual, targets[arm]), f'{arm} target marker is at the wrong pose')
+                _require(math.isclose(abs(np.dot(orientation, orientations[arm])), 1.0, abs_tol=1e-6),
+                         f'{arm} target marker has the wrong orientation')
+                _require(pb.getVisualShapeData(uid), f'No {arm} target marker visual shape')
+            return 'tool0 target positions, IK orientations and visual shapes verified'
+        self.beh.clear_ee_trajectory(robot)
+        self._call(name, robot, **kwargs)
+        shifted = {arm: (xyz[0], xyz[1], xyz[2] + 0.02) for arm, xyz in targets.items()}
+        kwargs['position_xyz'] = next(iter(shifted.values()))
+        if robot == 'dual':
+            kwargs.update(left_position_xyz=shifted['left'], right_position_xyz=shifted['right'])
+        self._call(name, robot, **kwargs)
+        _require(all(len(self.beh._ee_traj_points[arm]) == 2 for arm in arms), 'Trajectory points were not added')
+        if not self.env.vis:
+            raise SkipBehavior('trajectory points verified; debug-line drawing requires the GUI')
+        _require(all(any(uid >= 0 for uid in self.beh._ee_traj_debug_ids[arm]) for arm in arms), 'No trajectory debug lines')
+        return 'trajectory points and debug lines verified'
+
+    def check(self, name, robot):
+        if name in {'tossing_object', 'text_to_speech'}:
+            raise SkipBehavior('stub: no throwing implementation' if name == 'tossing_object' else 'stub: no speech backend')
+        if name == 'list_behaviors':
+            listed = self._call(name, robot)
+            _require(listed == self.beh.available_behaviors(), 'Behavior listing does not match the registry')
+            return f'{len(listed)} registered entries'
+        if name in {'get_object_pose_from_pybullet', 'print_object_pose_from_pybullet', 'set_object_pose_in_pybullet'}:
+            body = self._object()
+            if name == 'set_object_pose_in_pybullet':
+                expected = (0.42, -0.65, 0.92)
+                orn = pb.getQuaternionFromEuler((0, 0, 0.3))
+                self._call(name, robot, body_id=body, position=expected, orientation_xyzw=orn)
+                actual, actual_orn = pb.getBasePositionAndOrientation(body)
+                _require(np.allclose(actual, expected) and np.allclose(actual_orn, orn), 'Object pose did not update')
+            elif name == 'get_object_pose_from_pybullet':
+                pose = self._call(name, robot, body_id=body)
+                pos, orn = pb.getBasePositionAndOrientation(body)
+                _require(np.allclose(pose['position'], pos) and np.allclose(pose['orientation_xyzw'], orn), 'Object pose readback differs')
+            else:
+                self._call(name, robot, body_id=body)
+            return 'temporary fixture object'
+        if name.startswith(('get_', 'save_')) and name.endswith('_cam_img'):
+            return self._check_camera(name, robot)
+        if name.startswith('go_to_initial'):
+            preset = name.removeprefix('go_to_')
+            _require(self._call(name, robot, steps=1000), 'Preset motion returned False')
+            expected = [v for arm in self._arms(robot) for v in self.beh._PRESET_JOINTS[arm][preset]]
+            return self._check_joints(robot, expected)
+        if name in {'IK_move_to_pose', 'IK_move_to_pose_real_time'}:
+            return self._check_ik(name, robot)
+        if name == 'read_all_joints':
+            actual = np.asarray(self._call(name, robot), dtype=float)
+            expected = [pb.getJointState(self.env.robot_id, self.env.joints[j].id)[0]
+                        for arm in self._arms(robot) for j in self.beh._arm_joint_names(arm)]
+            _require(actual.shape == (len(expected),) and np.isfinite(actual).all(), 'Invalid joint vector')
+            _require(np.allclose(actual, expected), 'Joint readback differs from PyBullet')
+            return f'{len(actual)} joint values verified'
+        if name == 'get_specific_joint_value':
+            joints = self.beh.read_all_joints(robot)
+            for index in range(len(joints)):
+                value = self._call(name, robot, joint_number=index)
+                _require(math.isclose(value, joints[index], abs_tol=1e-6), f'Joint {index} readback differs')
+            return f'all {len(joints)} indices verified'
+        if name in {'set_all_joints', 'set_specific_joint_value', 'directly_set_all_joints'}:
+            original = self.beh.read_all_joints(robot)
+            target = list(original)
+            target[0] += 0.03
+            if robot == 'dual' and name != 'set_specific_joint_value':
+                target[6] += 0.03
+            try:
+                kwargs = dict(joint_number=0, joint_value=target[0], steps=600) if name == 'set_specific_joint_value' else dict(joints=target)
+                if name == 'set_all_joints':
+                    kwargs['steps'] = 600
+                _require(self._call(name, robot, **kwargs), 'Joint command returned False')
+                return self._check_joints(robot, target, tolerance=0.003)
+            finally:
+                self.beh.set_all_joints(robot, original, steps=600)
+        if name in {'open_gripper', 'close_gripper', 'partially_open_gripper'}:
+            return self._check_gripper(name, robot)
+        if name == 'read_current_ee_pose':
+            poses = self._call(name, robot)
+            if robot != 'dual':
+                poses = {robot: poses}
+            for arm in self._arms(robot):
+                state = pb.getLinkState(self.env.robot_id, self.beh._eef_link_id(arm))
+                pose = poses[arm]
+                _require(np.allclose(pose['position'], state[0]) and np.allclose(pose['orientation_xyzw'], state[1]), f'{arm} EE readback differs')
+            return 'EE positions and orientations verified'
+        if name in {'enable_eef_mesh_debug', 'visualize_target_ee_pose', 'visualize_ee_trajectory', 'clear_ee_trajectory'}:
+            return self._check_visualization(name, robot)
+        raise AssertionError(f'No check implemented for registered behavior {name!r}')
+
+
+def run_all_behaviors(beh, *, robots, output_dir: Path, pause_s: float = 0.0):
+    runner = BehaviorCheckRunner(beh, output_dir)
+    results = []
+    try:
+        for info in beh.available_behaviors():
+            if info.robot != 'any' and info.robot not in robots:
+                continue
+            started = time.perf_counter()
+            try:
+                detail = runner.check(info.name, info.robot)
+                status = 'PASS'
+            except SkipBehavior as exc:
+                status, detail = 'SKIP', str(exc)
+            except Exception as exc:
+                status, detail = 'FAIL', f'{type(exc).__name__}: {exc}'
+            result = BehaviorCheckResult(info.name, info.robot, status, detail, time.perf_counter() - started)
+            results.append(result)
+            print(f'[{status}] {info.name:30s} robot={info.robot:5s} ({result.duration_s:.2f}s) {detail}', flush=True)
+            if pause_s > 0:
+                time.sleep(pause_s)
+    finally:
+        runner.close()
+    counts = {status: sum(result.status == status for result in results) for status in ('PASS', 'FAIL', 'SKIP')}
+    print(f"\nChecked {len(results)} registered entries: {counts['PASS']} passed, {counts['FAIL']} failed, {counts['SKIP']} skipped.")
+    return results
+
+
 def main():
     args = parse_args()
-
     env = _make_env(vis=args.vis, debug=args.debug)
     beh = Behaviors(env)
-
     try:
-        print("\n=== Available behaviors ===")
-        beh.list_behaviors()
-
-        robot: RobotSelector = args.robot
-        pause = float(args.sleep)
-
-        if bool(args.interactive):
-            _interactive_loop(beh, default_robot=robot, pause_s=pause)
-            return
-
-        print("\n=== Go to initial pose ===")
-        beh.go_to_initial_pose(robot, steps=2000)
-        time.sleep(pause)
-
-        print("\n=== Gripper open/close ===")
-        beh.open_gripper(robot)
-        time.sleep(pause)
-        beh.close_gripper(robot, check_contact=False)
-        time.sleep(pause)
-        beh.open_gripper(robot)
-        time.sleep(pause)
-
-        print("\n=== Read joints ===")
-        joints = beh.read_all_joints(robot)
-        print(f"{robot} joints ({len(joints)}): {[round(v, 4) for v in joints]}")
-        time.sleep(pause)
-
-        print("\n=== Set specific joint (small delta) and restore ===")
-        idx = 0
-        old = beh.get_specific_joint_value(robot, idx)
-        beh.set_specific_joint_value(robot, idx, old + 0.05, steps=500)
-        time.sleep(pause)
-        beh.set_specific_joint_value(robot, idx, old, steps=500)
-        time.sleep(pause)
-
-        print("\n=== IK move to pose ===")
-        if robot in ("left", "right"):
-            x, y, z = _safe_target_xyz(env, robot)
-            ok, state = beh.IK_move_to_pose(robot, position_xyz=(x, y, z), yaw=0.0, max_step=1000)
-            print(f"IK {robot}: ok={ok} state={state}")
-            if state is not None:
-                (cur_xyz, _cur_xyzw) = state
-                dx = float(cur_xyz[0]) - float(x)
-                dy = float(cur_xyz[1]) - float(y)
-                dz = float(cur_xyz[2]) - float(z)
-                l1 = abs(dx) + abs(dy) + abs(dz)
-                print(
-                    f"  target=({x:.4f}, {y:.4f}, {z:.4f}) "
-                    f"achieved=({cur_xyz[0]:.4f}, {cur_xyz[1]:.4f}, {cur_xyz[2]:.4f}) "
-                    f"|err|_1={l1:.6f}"
-                )
-            time.sleep(pause)
-
-            ee = beh.read_current_ee_pose(robot)
-            print(f"EE {robot}: {ee}")
-
-            if args.vis:
-                beh.visualize_target_ee_pose(robot, position_xyz=(x, y, z), duration_s=5.0)
-                # Add a couple points to trajectory
-                beh.visualize_ee_trajectory(robot, position_xyz=(x, y, z), duration_s=10.0)
-                beh.visualize_ee_trajectory(robot, position_xyz=(x, y, z + 0.05), duration_s=10.0)
-                beh.visualize_ee_trajectory(robot, position_xyz=(x, y, z), duration_s=10.0)
-
-        else:
-            lx, ly, lz = _safe_target_xyz(env, "left")
-            rx, ry, rz = _safe_target_xyz(env, "right")
-            ok, _ = beh.IK_move_to_pose(
-                "dual",
-                position_xyz=(0.0, 0.0, 0.0),  # ignored for dual
-                left_position_xyz=(lx, ly, lz),
-                right_position_xyz=(rx, ry, rz),
-                yaw=0.0,
-                max_step=1000,
-            )
-            print(f"IK dual: ok={ok}")
-            time.sleep(pause)
-
-            ee = beh.read_current_ee_pose("dual")
-            print(f"EE dual: {ee}")
-
-            if args.vis:
-                beh.visualize_target_ee_pose(
-                    "dual",
-                    position_xyz=(0.0, 0.0, 0.0),  # ignored for dual
-                    left_position_xyz=(lx, ly, lz),
-                    right_position_xyz=(rx, ry, rz),
-                    duration_s=5.0,
-                )
-
-        print("\n=== Object pose (example: target basket) ===")
-        try:
-            beh.print_object_pose_from_pybullet(getattr(env, "target_id", -1))
-        except Exception as exc:
-            print(f"Object pose read failed: {exc}")
-
-        print("\nDone.")
-
+        if args.interactive:
+            _interactive_loop(beh, default_robot='dual' if args.robot == 'all' else args.robot, pause_s=args.sleep)
+            return 0
+        robots = ('left', 'right', 'dual') if args.robot == 'all' else (args.robot,)
+        with TemporaryDirectory(prefix='behavior_checks_') as temporary:
+            output_dir = args.output_dir if args.output_dir is not None else Path(temporary)
+            results = run_all_behaviors(beh, robots=robots, output_dir=output_dir, pause_s=args.sleep)
+        if args.output_dir is not None:
+            print(f'Camera check files: {args.output_dir.resolve()}')
+        return 1 if any(result.status == 'FAIL' for result in results) else 0
+    except KeyboardInterrupt:
+        print('\nBehavior checks interrupted.')
+        return 130
     finally:
-        try:
-            env.close()
-        except Exception:
-            pass
+        env.close()
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    raise SystemExit(main())

@@ -33,6 +33,12 @@ class Environment:
     ROBOT_BASE_POS = [0.0, 0.075, 0.78]
     ROBOT_BASE_RPY = [0.0, 0.0, np.pi]
 
+    # Fixed observer looking toward the robot from the front of the worktable.
+    FRONT_CAMERA_POS = (0.0, -1.95, 1.75)
+    FRONT_CAMERA_TARGET = (0.0, -0.12, 1.0)
+    FRONT_CAMERA_FOV = 55.0
+    FRONT_CAMERA_SIZE = (640, 640)
+
     # Motor/physics tuning to reduce jitter in POSITION_CONTROL.
     ARM_FORCE_SCALE = 1.0
     ARM_POSITION_GAIN = 0.035
@@ -120,15 +126,15 @@ class Environment:
         self.camera = camera
 
         # EE pose visualization using a mesh marker (optional GUI helper).
-        # When enabled, we attach a visual-only mesh to left_tool0/right_tool0 via
-        # a fixed constraint so it follows the current EE pose continuously.
+        # When enabled, visual-only meshes follow left_tool0/right_tool0 without
+        # applying any physical constraints or forces to the arms.
         self._eef_mesh_debug_enabled = False
         self._eef_mesh_debug_stl_path: Optional[str] = None
         self._eef_mesh_debug_mesh_scale = 1.0
         self._eef_mesh_debug_rgba = (1.0, 1.0, 1.0, 1.0)
         self._eef_mesh_debug_parent_to_mesh_xyz = (0.0, 0.0, 0.0)
         self._eef_mesh_debug_parent_to_mesh_quat_xyzw = (0.0, 0.0, 0.0, 1.0)
-        # Per-arm created bodies/constraints.
+        # Per-arm created bodies; constraint IDs retained for cleanup compatibility.
         self._eef_mesh_debug_body_uid: dict[str, int] = {}
         self._eef_mesh_debug_cid: dict[str, int] = {}
 
@@ -139,12 +145,16 @@ class Environment:
         # Optional: auto-update camera mosaic viewer on each simulation step.
         # Disabled by default to avoid adding GUI overhead to training runs.
         self.auto_stream_cameras = False
-        self.auto_stream_cameras_which = ("external", "head", "left", "right")
+        self.auto_stream_cameras_which = ("external", "front", "head", "left", "right")
         self.auto_stream_cameras_show_depth = False
         self.auto_stream_cameras_max_fps = 5.0
         # Important: avoid sleeping inside the GUI viewer when called from step_simulation().
         self.auto_stream_cameras_pause_s = 0.0
         self.auto_stream_cameras_use_blit = True
+        self.auto_stream_cameras_backend = "opencv"
+        self.auto_stream_cameras_async = True
+        self._camera_stream_configured = False
+        self._cv_camera_worker = None
 
         # Debug drawing (axes + rays) for wrist cameras.
         # This is fairly expensive; default to enabled only when debug=True.
@@ -222,6 +232,16 @@ class Environment:
             self.camera.default_renderer = self.camera_renderer
         except Exception:
             pass
+        self.front_camera = Camera(
+            self.FRONT_CAMERA_POS,
+            self.FRONT_CAMERA_TARGET,
+            near=0.1,
+            far=6.0,
+            size=self.FRONT_CAMERA_SIZE,
+            fov=self.FRONT_CAMERA_FOV,
+            up_vector=(0, 0, 1),
+        )
+        self.front_camera.default_renderer = self.camera_renderer
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setTimeStep(1.0 / 240.0)
         p.setPhysicsEngineParameter(numSolverIterations=200)
@@ -746,6 +766,14 @@ class Environment:
             renderer=effective_renderer,
         )
 
+    def get_front_cam_img(self, return_depth: bool = True, return_seg: bool = False, renderer=None):
+        """Return the fixed frontal view of both arms, the robot, and the table."""
+        return self.front_camera.get_cam_img(
+            return_depth=bool(return_depth),
+            return_seg=bool(return_seg),
+            renderer=self.camera_renderer if renderer is None else renderer,
+        )
+
     def get_head_cam_img(self, return_depth: bool = True, return_seg: bool = True, renderer=p.ER_BULLET_HARDWARE_OPENGL):
         """Return (rgb, depth, seg) from the head-mounted Kinect camera."""
         if self.head_camera is None or self._head_camera_link_name is None:
@@ -957,15 +985,20 @@ class Environment:
 
     def visualize_cameras(
         self,
-        which: Iterable[str] = ("external", "head", "left", "right"),
+        which: Iterable[str] = ("external", "front", "head", "left", "right"),
         show_depth: bool = False,
         window_name: str = "cameras",
         wait_ms: int = 1,
         renderer=None,
+        max_fps: float | None = None,
+        async_display: bool = False,
     ) -> bool:
         """Visualize camera streams live in an OpenCV window.
 
         Call this once per control/sim step to stream frames while the robot moves.
+        max_fps throttles capture as well as display; skipped frames do no GUI work.
+        async_display moves conversion, mosaic building, and GUI events into a
+        separate process. PyBullet captures remain on the simulation thread.
 
         Returns:
             True to continue, False if user requested quit (q/esc) or visualization is unavailable.
@@ -976,6 +1009,14 @@ class Environment:
             # Likely opencv not installed (or headless build missing GUI).
             return False
 
+        worker = getattr(self, "_cv_camera_worker", None)
+        if async_display and worker is not None and not worker.is_alive():
+            return False
+        if max_fps is not None and float(max_fps) > 0.0:
+            last = getattr(self, "_cv_cam_last_draw_ts", None)
+            if last is not None and time.monotonic() - last < 1.0 / float(max_fps):
+                return True
+
         which_set = set(str(s).lower() for s in which)
         effective_renderer = self.camera_renderer if renderer is None else renderer
 
@@ -984,16 +1025,6 @@ class Environment:
             if arr.dtype != np.uint8:
                 arr = np.clip(arr, 0, 255).astype(np.uint8)
             return arr
-
-        def _rgb_to_bgr(rgb_u8):
-            return cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2BGR)
-
-        def _depth_to_vis(depth):
-            d = np.asarray(depth)
-            d = np.nan_to_num(d, nan=0.0, posinf=0.0, neginf=0.0)
-            d_norm = cv2.normalize(d, None, 0, 255, cv2.NORM_MINMAX)
-            d_u8 = d_norm.astype(np.uint8)
-            return cv2.applyColorMap(d_u8, cv2.COLORMAP_TURBO)
 
         rgb_frames: dict[str, np.ndarray] = {}
         depth_frames: dict[str, np.ndarray] = {}
@@ -1008,6 +1039,19 @@ class Environment:
                 rgb_frames["external"] = _as_uint8_rgb(rgb)
                 if depth is not None:
                     depth_frames["external"] = np.asarray(depth)
+        except Exception:
+            pass
+
+        try:
+            if "front" in which_set:
+                rgb, depth, _seg = self.get_front_cam_img(
+                    return_depth=bool(show_depth),
+                    return_seg=False,
+                    renderer=effective_renderer,
+                )
+                rgb_frames["front"] = _as_uint8_rgb(rgb)
+                if depth is not None:
+                    depth_frames["front"] = np.asarray(depth)
         except Exception:
             pass
 
@@ -1053,56 +1097,49 @@ class Environment:
         if not rgb_frames:
             return False
 
-        any_frame = next(iter(rgb_frames.values()))
-        h, w = int(any_frame.shape[0]), int(any_frame.shape[1])
-        blank = np.zeros((h, w, 3), dtype=np.uint8)
+        if async_display:
+            from environment.camera_viewer import OpenCVCameraViewer
+            if worker is None:
+                worker = self._cv_camera_worker = OpenCVCameraViewer(window_name)
+            ok = worker.submit(rgb_frames, depth_frames if show_depth else None)
+            self._cv_cam_last_draw_ts = time.monotonic()
+            return ok
 
-        def _labeled(name: str):
-            rgb_u8 = rgb_frames.get(name)
-            bgr = blank.copy() if rgb_u8 is None else _rgb_to_bgr(rgb_u8)
-            cv2.putText(
-                bgr,
-                name,
-                (10, 25),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-            return bgr
-
-        mosaic_rgb = np.vstack(
-            [
-                np.hstack([_labeled("external"), _labeled("head")]),
-                np.hstack([_labeled("left"), _labeled("right")]),
-            ]
-        )
+        from environment.camera_viewer import make_camera_mosaics
+        mosaic_rgb, mosaic_depth = make_camera_mosaics(rgb_frames, depth_frames if show_depth else None)
 
         try:
+            if window_name in getattr(self, "_cv_camera_windows", set()):
+                # Some backends (including Wayland) do not support this query.
+                try:
+                    if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) == 0:
+                        return False
+                except cv2.error:
+                    pass
             cv2.imshow(window_name, mosaic_rgb)
-            if show_depth:
-                def _d(name: str):
-                    return _depth_to_vis(depth_frames.get(name, np.zeros((h, w), dtype=np.float32)))
-
-                mosaic_depth = np.vstack(
-                    [
-                        np.hstack([_d("external"), _d("head")]),
-                        np.hstack([_d("left"), _d("right")]),
-                    ]
-                )
+            if not hasattr(self, "_cv_camera_windows"):
+                self._cv_camera_windows = set()
+            first_frame = window_name not in self._cv_camera_windows
+            self._cv_camera_windows.add(window_name)
+            if mosaic_depth is not None:
                 cv2.imshow(f"{window_name}_depth", mosaic_depth)
+                self._cv_camera_windows.add(f"{window_name}_depth")
 
-            key = int(cv2.waitKey(int(wait_ms))) & 0xFF
+            # waitKey(0) waits forever; streaming must always return to physics.
+            key = int(cv2.waitKey(max(1, int(wait_ms)))) & 0xFF
+            self._cv_cam_last_draw_ts = time.monotonic()
+            if first_frame:
+                print(f"[viewer] Opened OpenCV camera window '{window_name}'")
             if key in (27, ord('q')):
                 return False
             return True
-        except Exception:
+        except Exception as exc:
+            print(f"[viewer] OpenCV camera viewer failed: {exc}")
             return False
 
     def visualize_cameras_matplotlib(
         self,
-        which: Iterable[str] = ("external", "head", "left", "right"),
+        which: Iterable[str] = ("external", "front", "head", "left", "right"),
         show_depth: bool = False,
         window_title: str = "cameras",
         pause_s: float = 0.001,
@@ -1137,20 +1174,12 @@ class Environment:
             except Exception:
                 max_fps_f = 0.0
             if max_fps_f > 0.0:
-                now = float(time.time())
+                now = time.monotonic()
                 last = float(getattr(self, "_cam_last_draw_ts", 0.0))
                 min_dt = 1.0 / max_fps_f
                 if (now - last) < min_dt:
-                    # Called from the physics loop; do NOT sleep here.
-                    # Just let the GUI backend process pending events (non-blocking).
-                    try:
-                        fig = viewer_existing.get("fig")
-                        if fig is not None:
-                            fig.canvas.flush_events()
-                    except Exception:
-                        pass
+                    # Process GUI events at the display rate, not every physics step.
                     return True
-                self._cam_last_draw_ts = now
 
         which_set = set(str(s).lower() for s in which)
         effective_renderer = self.camera_renderer if renderer is None else renderer
@@ -1176,6 +1205,19 @@ class Environment:
                 rgb_frames["external"] = _as_u8_rgb(rgb)
                 if depth is not None:
                     depth_frames["external"] = np.asarray(depth)
+        except Exception:
+            pass
+
+        try:
+            if "front" in which_set:
+                rgb, depth, _seg = self.get_front_cam_img(
+                    return_depth=bool(show_depth),
+                    return_seg=False,
+                    renderer=effective_renderer,
+                )
+                rgb_frames["front"] = _as_u8_rgb(rgb)
+                if depth is not None:
+                    depth_frames["front"] = np.asarray(depth)
         except Exception:
             pass
 
@@ -1242,12 +1284,18 @@ class Environment:
                 return blank_depth
             return (d - mn) / (mx - mn)
 
-        order = ("external", "head", "left", "right")
+        from environment.camera_viewer import camera_label, camera_panel_order
+        order = camera_panel_order(which_set)
 
         viewer = getattr(self, "_cam_viewer", None)
+        if viewer is not None and viewer.get("order") != order:
+            plt.close(viewer["fig"])
+            if viewer.get("depth_fig") is not None:
+                plt.close(viewer["depth_fig"])
+            viewer = self._cam_viewer = None
         if viewer is None or "fig" not in viewer:
             plt.ion()
-            fig, axes = plt.subplots(2, 2, num=window_title)
+            fig, axes = plt.subplots(2, len(order) // 2, num=window_title)
             try:
                 fig.canvas.manager.set_window_title(window_title)
             except Exception:
@@ -1255,7 +1303,7 @@ class Environment:
 
             ims = {}
             for ax, name in zip(axes.ravel(), order):
-                ax.set_title(name)
+                ax.set_title(camera_label(name))
                 ax.axis('off')
                 ims[name] = ax.imshow(_get_rgb(name), animated=bool(use_blit))
 
@@ -1263,14 +1311,14 @@ class Environment:
             depth_axes = None
             depth_ims = None
             if bool(show_depth):
-                depth_fig, depth_axes = plt.subplots(2, 2, num=f"{window_title}_depth")
+                depth_fig, depth_axes = plt.subplots(2, len(order) // 2, num=f"{window_title}_depth")
                 try:
                     depth_fig.canvas.manager.set_window_title(f"{window_title}_depth")
                 except Exception:
                     pass
                 depth_ims = {}
                 for ax, name in zip(depth_axes.ravel(), order):
-                    ax.set_title(name)
+                    ax.set_title(camera_label(name))
                     ax.axis('off')
                     depth_ims[name] = ax.imshow(
                         _get_depth_norm(name),
@@ -1286,6 +1334,7 @@ class Environment:
 
             self._cam_viewer = {
                 "fig": fig,
+                "order": order,
                 "axes": axes,
                 "ims": ims,
                 "depth_fig": depth_fig,
@@ -1436,15 +1485,21 @@ class Environment:
 
         try:
             ps = float(pause_s)
-            # pause_s==0 can freeze some backends; use an epsilon.
-            plt.pause(ps if ps > 0.0 else 1e-6)
+            # Events were flushed above. Do not call plt.pause(): it shows and
+            # activates the window every frame, and sub-millisecond intervals
+            # can round to a zero (unbounded) timer on Qt backends.
+            if ps > 0.0:
+                viewer["fig"].canvas.start_event_loop(max(ps, 0.001))
         except Exception:
             pass
+        # Leave physics time between frames even when capture takes longer
+        # than the requested frame interval.
+        self._cam_last_draw_ts = time.monotonic()
         return True
 
     def profile_camera_capture(
         self,
-        which: Iterable[str] = ("external", "head", "left", "right"),
+        which: Iterable[str] = ("external", "front", "head", "left", "right"),
         iters: int = 50,
         renderer=None,
     ):
@@ -1456,7 +1511,7 @@ class Environment:
         which_set = set(str(s).lower() for s in which)
         iters_i = max(1, int(iters))
 
-        timers = {"external": 0.0, "head": 0.0, "left": 0.0, "right": 0.0}
+        timers = {"external": 0.0, "front": 0.0, "head": 0.0, "left": 0.0, "right": 0.0}
         counts = {k: 0 for k in timers}
 
         def _t(fn, key: str):
@@ -1484,6 +1539,11 @@ class Environment:
                     _t(lambda: self.get_head_cam_img(return_depth=True, return_seg=False, renderer=renderer), "head")
                 except Exception:
                     pass
+            if "front" in which_set:
+                try:
+                    _t(lambda: self.get_front_cam_img(return_depth=True, return_seg=False, renderer=renderer), "front")
+                except Exception:
+                    pass
             if "left" in which_set and getattr(self, "left_arm_camera", None) is not None:
                 try:
                     _t(lambda: self.get_left_arm_cam_img(return_depth=True, return_seg=False, renderer=renderer), "left")
@@ -1496,13 +1556,13 @@ class Environment:
                     pass
 
         print("[profile] camera capture avg ms/frame:")
-        for k in ("external", "head", "left", "right"):
+        for k in ("external", "front", "head", "left", "right"):
             if counts[k] == 0:
                 continue
             ms = 1000.0 * timers[k] / float(counts[k])
             print(f"  - {k}: {ms:.3f} ms")
 
-    def profile_matplotlib_update(self, which: Iterable[str] = ("external", "head", "left", "right"), iters: int = 50):
+    def profile_matplotlib_update(self, which: Iterable[str] = ("external", "front", "head", "left", "right"), iters: int = 50):
         """Profile the full visualize_cameras_matplotlib() call (capture + draw)."""
         iters_i = max(1, int(iters))
         t_total = 0.0
@@ -1584,6 +1644,12 @@ class Environment:
         #     pass
 
         p.stepSimulation()
+        if getattr(self, "_eef_mesh_debug_enabled", False):
+            try:
+                self._ensure_eef_mesh_debug()
+            except Exception:
+                # Debug visualization should never break the simulation.
+                pass
         if self.vis:
             # Clean up any expired debug bodies.
             if getattr(self, "_debug_bodies_expiry", None):
@@ -1657,14 +1723,6 @@ class Environment:
                 except Exception:
                     pass
 
-            # Ensure EE mesh debug is created if enabled.
-            if getattr(self, "_eef_mesh_debug_enabled", False):
-                try:
-                    self._ensure_eef_mesh_debug()
-                except Exception:
-                    # Debug viz should never break the simulation.
-                    pass
-
             # Update camera frame axis visualization (wrist-mounted cameras).
             if getattr(self, "draw_camera_frame_debug", False):
                 try:
@@ -1680,22 +1738,27 @@ class Environment:
                 end[2] -= 0.5
                 self.eef_debug_lineID = p.addUserDebugLine(np.array(eef_xyz[0]), end, [1, 0, 0])
 
-            # Optional camera stream driven by stepping (useful when the caller
-            # does not explicitly call visualize_cameras_matplotlib() every loop).
-            # if getattr(self, "auto_stream_cameras", True):
-            if (self.auto_stream_cameras):
+            # Both backends throttle capture before calling getCameraImage().
+            if self.auto_stream_cameras:
                 try:
-                    # print("[auto_stream_cameras] Streaming camera views...")
-                    self.visualize_cameras_matplotlib(
-                        which=getattr(self, "auto_stream_cameras_which", ("external", "head", "left", "right")),
-                        show_depth=bool(getattr(self, "auto_stream_cameras_show_depth", False)),
-                        window_title="cameras",
-                        pause_s=float(getattr(self, "auto_stream_cameras_pause_s", 0.001)),
-                        max_fps=float(getattr(self, "auto_stream_cameras_max_fps", 10.0)),
-                        use_blit=bool(getattr(self, "auto_stream_cameras_use_blit", True)),
+                    kwargs = dict(
+                        which=self.auto_stream_cameras_which,
+                        show_depth=self.auto_stream_cameras_show_depth,
+                        max_fps=self.auto_stream_cameras_max_fps,
                     )
-                except Exception:
-                    pass
+                    if self.auto_stream_cameras_backend == "opencv":
+                        ok = self.visualize_cameras(**kwargs, async_display=self.auto_stream_cameras_async)
+                    else:
+                        ok = self.visualize_cameras_matplotlib(
+                            **kwargs,
+                            pause_s=self.auto_stream_cameras_pause_s,
+                            use_blit=self.auto_stream_cameras_use_blit,
+                        )
+                    if not ok:
+                        self.enable_camera_streaming(enabled=False)
+                except Exception as exc:
+                    print(f"[viewer] Camera streaming stopped: {exc}")
+                    self.enable_camera_streaming(enabled=False)
             time.sleep(self.SIMULATION_STEP_DELAY)
 
     def register_debug_body_expiry(self, body_uid: int, lifetime_s: float) -> None:
@@ -1760,7 +1823,9 @@ class Environment:
     ):
         """Enable/disable mesh visualization for the current EE pose.
 
-        This attaches a visual-only mesh to each tool0 link via a fixed constraint.
+        Visual-only bodies follow each tool0 transform after physics steps. They
+        have no collision shape or constraint, so enabling them cannot hold an
+        arm in place.
 
         Args:
             enabled: Toggle mesh visualization.
@@ -1860,10 +1925,21 @@ class Environment:
         for arm in arms:
             if arm not in ("left", "right"):
                 continue
-            if arm in self._eef_mesh_debug_body_uid:
-                continue
             li = arm_to_li.get(arm)
             if li is None:
+                continue
+
+            ls = p.getLinkState(self.robot_id, int(li), computeForwardKinematics=True)
+            tool_pos, tool_orn = (ls[4], ls[5]) if len(ls) >= 6 else (ls[0], ls[1])
+            parent_to_xyz = getattr(self, "_eef_mesh_debug_parent_to_mesh_xyz", (0.0, 0.0, 0.0))
+            parent_to_quat = getattr(self, "_eef_mesh_debug_parent_to_mesh_quat_xyzw", (0.0, 0.0, 0.0, 1.0))
+            marker_pos, marker_orn = p.multiplyTransforms(
+                tool_pos, tool_orn, parent_to_xyz, parent_to_quat
+            )
+            if arm in self._eef_mesh_debug_body_uid:
+                p.resetBasePositionAndOrientation(
+                    self._eef_mesh_debug_body_uid[arm], marker_pos, marker_orn
+                )
                 continue
 
             rgba = getattr(self, "_eef_mesh_debug_rgba", (1.0, 1.0, 1.0, 1.0))
@@ -1875,40 +1951,15 @@ class Environment:
                 meshScale=[mesh_scale, mesh_scale, mesh_scale],
                 rgbaColor=[float(rgba[0]), float(rgba[1]), float(rgba[2]), float(rgba[3])],
             )
-            # Spawn it at the current tool pose (it will be constrained after).
-            ls = p.getLinkState(self.robot_id, int(li), computeForwardKinematics=True)
-            tool_pos, tool_orn = (ls[4], ls[5]) if len(ls) >= 6 else (ls[0], ls[1])
             uid = p.createMultiBody(
                 baseMass=0.0,
                 baseVisualShapeIndex=int(vshape),
                 baseCollisionShapeIndex=-1,
-                basePosition=[float(tool_pos[0]), float(tool_pos[1]), float(tool_pos[2])],
-                baseOrientation=[float(tool_orn[0]), float(tool_orn[1]), float(tool_orn[2]), float(tool_orn[3])],
-            )
-
-            parent_to_xyz = getattr(self, "_eef_mesh_debug_parent_to_mesh_xyz", (0.0, 0.0, 0.0))
-            parent_to_quat = getattr(self, "_eef_mesh_debug_parent_to_mesh_quat_xyzw", (0.0, 0.0, 0.0, 1.0))
-
-            cid = p.createConstraint(
-                parentBodyUniqueId=int(self.robot_id),
-                parentLinkIndex=int(li),
-                childBodyUniqueId=int(uid),
-                childLinkIndex=-1,
-                jointType=p.JOINT_FIXED,
-                jointAxis=[0, 0, 0],
-                parentFramePosition=[float(parent_to_xyz[0]), float(parent_to_xyz[1]), float(parent_to_xyz[2])],
-                childFramePosition=[0.0, 0.0, 0.0],
-                parentFrameOrientation=[
-                    float(parent_to_quat[0]),
-                    float(parent_to_quat[1]),
-                    float(parent_to_quat[2]),
-                    float(parent_to_quat[3]),
-                ],
-                childFrameOrientation=[0.0, 0.0, 0.0, 1.0],
+                basePosition=marker_pos,
+                baseOrientation=marker_orn,
             )
 
             self._eef_mesh_debug_body_uid[arm] = int(uid)
-            self._eef_mesh_debug_cid[arm] = int(cid)
 
     def enable_camera_frame_debug(self, enabled: bool = True, clear_existing: bool = True):
         """Enable/disable the wrist-camera debug axes + target rays.
@@ -1943,19 +1994,56 @@ class Environment:
     def enable_camera_streaming(
         self,
         enabled: bool = True,
-        which: Iterable[str] = ("external", "head", "left", "right"),
+        which: Iterable[str] = ("external", "front", "head", "left", "right"),
         show_depth: bool = False,
         max_fps: float = 5.0,
         pause_s: float = 0.0,
         use_blit: bool = True,
+        backend: str = "opencv",
+        async_display: bool = True,
     ):
         """Enable/disable auto camera streaming driven by step_simulation()."""
+        backend = str(backend).lower()
+        if backend not in ("opencv", "matplotlib"):
+            raise ValueError("Camera backend must be 'opencv' or 'matplotlib'")
+        if enabled and backend == "opencv":
+            import cv2
+            if "NONE" in next((line for line in cv2.getBuildInformation().splitlines() if "GUI:" in line), ""):
+                raise RuntimeError(
+                    "OpenCV has no GUI support. Use --stream_backend=matplotlib "
+                    "or install a GUI-enabled OpenCV build instead of opencv-python-headless."
+                )
+        worker = getattr(self, "_cv_camera_worker", None)
+        if worker is not None:
+            worker.close()
+            self._cv_camera_worker = None
+        if enabled:
+            self._camera_stream_configured = True
+            self._cv_cam_last_draw_ts = None
+            self._cam_last_draw_ts = 0.0
+        else:
+            for name in getattr(self, "_cv_camera_windows", set()):
+                try:
+                    import cv2
+                    cv2.destroyWindow(name)
+                except Exception:
+                    pass
+            self._cv_camera_windows = set()
+            viewer = getattr(self, "_cam_viewer", None)
+            if viewer is not None:
+                import matplotlib.pyplot as plt
+                for key in ("fig", "depth_fig"):
+                    if viewer.get(key) is not None:
+                        plt.close(viewer[key])
+                self._cam_viewer = None
         self.auto_stream_cameras = bool(enabled)
         self.auto_stream_cameras_which = tuple(str(s).lower() for s in which)
         self.auto_stream_cameras_show_depth = bool(show_depth)
         self.auto_stream_cameras_max_fps = float(max_fps)
         self.auto_stream_cameras_pause_s = float(pause_s)
         self.auto_stream_cameras_use_blit = bool(use_blit)
+        self.auto_stream_cameras_backend = backend
+        self.auto_stream_cameras_async = bool(async_display)
 
     def _update_link_frame_debug(self, key: str, link_index: int, axis_len: float | None = None):
         axis_len = float(self.camera_frame_axis_len if axis_len is None else axis_len)
@@ -2575,11 +2663,13 @@ class Environment:
 
     def _apply_object_dynamics(self, obj_id: int, mod_stiffness: bool):
         try:
-            # Objects must have sufficient friction too; otherwise they will still
-            # slip/roll out even if the finger pads are high-friction.
-            obj_lat_fric = float(os.getenv("PB_OBJECT_LATERAL_FRICTION", "2.5"))
-            obj_roll_fric = float(os.getenv("PB_OBJECT_ROLLING_FRICTION", "0.01"))
-            obj_spin_fric = float(os.getenv("PB_OBJECT_SPINNING_FRICTION", "0.01"))
+            # Keep object contacts free to slide and rotate out of a pile. Using
+            # the finger-pad coefficient (2.5) on every object makes object-object
+            # friction 6.25 and can leave a lifted object carrying its neighbours.
+            # Finger pads retain their higher friction for grasping.
+            obj_lat_fric = float(os.getenv("PB_OBJECT_LATERAL_FRICTION", "0.6"))
+            obj_roll_fric = float(os.getenv("PB_OBJECT_ROLLING_FRICTION", "0.005"))
+            obj_spin_fric = float(os.getenv("PB_OBJECT_SPINNING_FRICTION", "0.005"))
             if mod_stiffness:
                 p.changeDynamics(
                     obj_id,
@@ -2588,7 +2678,7 @@ class Environment:
                     rollingFriction=obj_roll_fric,
                     spinningFriction=obj_spin_fric,
                     restitution=0.0,
-                    frictionAnchor=1,
+                    frictionAnchor=0,
                     contactStiffness=100000,
                     contactDamping=50.0,
                 )
@@ -2600,10 +2690,15 @@ class Environment:
                     rollingFriction=obj_roll_fric,
                     spinningFriction=obj_spin_fric,
                     restitution=0.0,
-                    frictionAnchor=1,
+                    frictionAnchor=0,
                 )
         except Exception:
             pass
+
+    def _apply_object_domain_randomization(self, obj_id, path):
+        randomizer = getattr(self, "_domain_randomizer", None)
+        if randomizer is not None:
+            randomizer.apply_object(obj_id, path)
 
     def _load_obj_body(self, path, pos, yaw, mod_orn=False, mod_stiffness=False):
         # NOTE: This method does not register the object in self.obj_ids/positions/orientations.
@@ -2623,6 +2718,7 @@ class Environment:
         p.resetBasePositionAndOrientation(obj_id, pos, orn)
         self._ensure_body_opaque(obj_id)
         self._apply_object_dynamics(obj_id, bool(mod_stiffness))
+        self._apply_object_domain_randomization(obj_id, path)
         self._set_rendering_enabled(True)
         self._refresh_rendering()
         return obj_id, pos, orn
@@ -2716,13 +2812,14 @@ class Environment:
             p.resetBaseVelocity(obj_id, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0])
             self._ensure_body_opaque(obj_id)
             self._apply_object_dynamics(obj_id, bool(mod_stiffness))
+            self._apply_object_domain_randomization(obj_id, path)
             self._refresh_rendering()
 
         self.obj_ids.append(obj_id)
         self.obj_positions.append(pos_out)
         self.obj_orientations.append(orn_out)
 
-        for _ in range(100):
+        for _ in range(300):
             self.step_simulation()
         self.wait_until_still(obj_id)
         self.update_obj_states()
@@ -2770,7 +2867,7 @@ class Environment:
 
             obj_id, _, _ = self.load_obj(
                 path, pos, yaw, mod_orn, mod_stiffness)
-            for _ in range(10):
+            for _ in range(300):
                 self.step_simulation()
             self.wait_until_still(obj_id, 30)
 
@@ -2912,23 +3009,11 @@ class Environment:
         
         for _ in range(max_step_i):
 
-            # Smoothing: blend target toward current EE position.
-            ## Option1: A fixed alpha to a small value (e.g., 0.1-0.3) for consistent timing and smoother trajectories, but may require tuning of max_step_i to ensure convergence within the step budget. Too small alpha can cause slow convergence, while too large can cause overshooting and instability, especially with complex dynamics or low control gains.
-            alpha = 0.2  # Fixed alpha for more consistent timing; may require tuning of max_step_i.
-
-            # Option2: Adaptable alpha based on distance: use larger steps when far, and slow down when near the target to avoid overshooting and allow settling. The specific scaling factor (0.5) and thresholds (0.05, 0.02) may require tuning based on the robot's dynamics and control gains.
-            # Larger distance -> larger alpha (faster), near target -> smaller alpha (smoother).
-            # try:
-            #     distance = float(np.linalg.norm(np.array((x, y, z)) - np.array(real_xyz)))
-            # except Exception:
-            #     distance = 0.0
-            # # Use a larger alpha when far (faster approach), and snap to alpha=1.0
-            # # when very close to avoid stalling with tiny incremental targets.
-            # alpha = float(np.clip(distance * 0.5, 0.05, 0.5))
-            # if distance < 0.02:
-            #     alpha = 1.0
-
-            
+            # Smooth the approach, then command the full target within 2 cm.
+            # Blending even the last few millimetres leaves the right arm just
+            # outside the 5 mm tolerance at the normal iteration budget.
+            distance = float(np.linalg.norm(np.array((x, y, z)) - np.array(real_xyz)))
+            alpha = 1.0 if distance < 0.02 else 0.2
 
             # apply IK
             x_tmp = alpha * x + (1-alpha)*real_xyz[0]
@@ -3102,7 +3187,20 @@ class Environment:
         return succes_grasp, succes_target
 
     def close(self):
-        p.disconnect(self.physicsClient)
+        try:
+            recorder = getattr(self, "_episode_recorder", None)
+            if recorder is not None:
+                recorder.close()
+        finally:
+            try:
+                self.enable_camera_streaming(enabled=False)
+            finally:
+                try:
+                    randomizer = getattr(self, "_domain_randomizer", None)
+                    if randomizer is not None:
+                        randomizer.close()
+                finally:
+                    p.disconnect(self.physicsClient)
 
     
 
