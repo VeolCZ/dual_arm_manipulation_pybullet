@@ -1,0 +1,41 @@
+{
+  "format_version": 1,
+  "created_utc": "2026-10-18T08:08:30.318978+00:00",
+  "cameras": [
+    "front",
+    "external",
+    "left",
+    "right"
+  ],
+  "fps": 3.0,
+  "requested_fps": 3.0,
+  "time_base": "simulation",
+  "status": "interrupted",
+  "n_frames": 76,
+  "dropped_frames": 0,
+  "scenario_metadata": {
+    "network": "GR_ConvNet",
+    "scenario": "isolated",
+    "run": 1,
+    "object": "PottedMeatCan"
+  },
+  "image_sizes": {
+    "front": [
+      640,
+      640
+    ],
+    "external": [
+      224,
+      224
+    ],
+    "left": [
+      224,
+      224
+    ],
+    "right": [
+      224,
+      224
+    ]
+  },
+  "duration_sim_seconds": 25.333333333333332
+}
