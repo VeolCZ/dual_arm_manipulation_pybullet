@@ -108,8 +108,8 @@ We can perform a simulation experiment by running the 'simulation.py' script. As
 
 
 ```bash
-cd ~/cognitive_robotics_manipulation
-python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=2
+cd ~/dual_arm_manipulation_pybullet
+python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=5
 ```
 
 ### Simulation parameters
@@ -155,7 +155,9 @@ Implement or enable those branches before running GGCNN, for example:
 
 ```bash
 python3 simulation.py --scenario=pile --network=GGCNN --runs=1 \
-  --gui=true --stream_cameras=false --device=GPU --save-network-output=true
+  --gui=true --device=GPU --save-network-output=true --save-network-output=true \
+  --record_episodes=true --record_dir=episodes --record_fps=3 --record_which=front,external,left,right 
+ 
 ```
 
 GGCNN receives metric depth with its mean removed, clipped to `[-1, 1]`. Its
