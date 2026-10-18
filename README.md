@@ -155,7 +155,7 @@ Implement or enable those branches before running GGCNN, for example:
 
 ```bash
 python3 simulation.py --scenario=pile --network=GGCNN --runs=1 \
-  --gui=true --device=GPU --save-network-output=true --save-network-output=true \
+  --gui=true --device=GPU --save-network-output=true \
   --record_episodes=true --record_dir=episodes --record_fps=3 --record_which=front,external,left,right 
  
 ```
