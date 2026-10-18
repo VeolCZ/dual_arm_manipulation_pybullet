@@ -255,64 +255,6 @@ existing settings. GGCNN consumes depth, so this mode does not alter its input.
 is independent. Recordings save the episode seed, sampled settings, and object
 texture choices under `scenario_metadata.domain_randomization` in `episode.json`.
 
-### Check all robot behaviors
-
-`test_behaviours.py` checks every registered common behavior and every left, right,
-and dual-arm variant by default:
-
-```bash
-python3 test_behaviours.py
-```
-
-For a faster run without GUI rendering or pauses between checks:
-
-```bash
-python3 test_behaviours.py --vis=false --sleep=0
-```
-
-Each check reports `PASS`, `FAIL`, or `SKIP`, followed by a summary. Failures return
-exit code 1, and remaining checks continue after a failure. Checks verify actual
-joint positions, IK position/orientation errors, gripper movement, object poses,
-camera buffers and saved images, and EE marker movement. Throwing and speech are
-reported as skipped because they are stubs. Headless runs also skip trajectory
-line rendering after checking the trajectory points; marker bodies are checked
-in both modes. Closing an empty gripper is checked by finger movement, since its
-return value indicates object contact rather than movement success.
-
-Use `--robot=left`, `--robot=right`, or `--robot=dual` to check one variant plus the
-common behaviors. Camera files are verified in a temporary directory and removed
-afterward; add `--output-dir=results/behavior_checks` to keep them. Interactive
-commands remain available with `--interactive=true` (the default robot is `dual`
-in interactive mode).
-
-`visualize_target_ee_pose` places a static marker at the desired **tool0 pose in
-world coordinates**. Its mesh origin is at the gripper mount, with no fingertip/TCP
-offset. Pass the same quaternion used for IK so the marker shows the intended
-orientation; omitting it uses identity (the fingers point along world +Z). Dual
-calls accept a shared `orientation_xyzw` and per-arm overrides. The behavior
-checker supplies each arm's top-down IK orientation. To follow the robot's actual
-tool0 pose continuously, use `enable_eef_mesh_debug`.
-
-### Object contact settings
-
-Objects use a lateral friction coefficient of `0.6`, rolling/spinning friction of
-`0.005`, and disabled friction anchoring. The gripper pads keep their higher lateral
-friction (`2.5`) so the fingers can hold objects while neighbouring objects can slide
-and separate. These settings apply when objects are loaded or reused; restart the
-simulation to apply changed defaults to a new run.
-
-The previous object coefficient of `2.5` produced an object-object coefficient of
-`6.25`, because [Bullet multiplies the two surface coefficients](https://github.com/bulletphysics/bullet3/blob/master/src/BulletCollision/CollisionDispatch/btManifoldResult.cpp).
-Together with anchored friction, those settings reproduced a lifted object carrying
-a neighbouring object suspended beneath it in the pile-and-lift regression test.
-
-Optional environment overrides:
-
-| Variable | Default |
-|---|---|
-| `PB_OBJECT_LATERAL_FRICTION` | `0.6` |
-| `PB_OBJECT_ROLLING_FRICTION` | `0.005` |
-| `PB_OBJECT_SPINNING_FRICTION` | `0.005` |
 
 ### Record episodes and review them later
 
@@ -450,6 +392,67 @@ Here is a screenshot of the result:
 <p align="center">
   <img src="images/sample_gso.png" width="400" title="">
 </p>
+
+
+
+### Check all robot behaviors
+
+`test_behaviours.py` checks every registered common behavior and every left, right,
+and dual-arm variant by default:
+
+```bash
+python3 test_behaviours.py
+```
+
+For a faster run without GUI rendering or pauses between checks:
+
+```bash
+python3 test_behaviours.py --vis=false --sleep=0
+```
+
+Each check reports `PASS`, `FAIL`, or `SKIP`, followed by a summary. Failures return
+exit code 1, and remaining checks continue after a failure. Checks verify actual
+joint positions, IK position/orientation errors, gripper movement, object poses,
+camera buffers and saved images, and EE marker movement. Throwing and speech are
+reported as skipped because they are stubs. Headless runs also skip trajectory
+line rendering after checking the trajectory points; marker bodies are checked
+in both modes. Closing an empty gripper is checked by finger movement, since its
+return value indicates object contact rather than movement success.
+
+Use `--robot=left`, `--robot=right`, or `--robot=dual` to check one variant plus the
+common behaviors. Camera files are verified in a temporary directory and removed
+afterward; add `--output-dir=results/behavior_checks` to keep them. Interactive
+commands remain available with `--interactive=true` (the default robot is `dual`
+in interactive mode).
+
+`visualize_target_ee_pose` places a static marker at the desired **tool0 pose in
+world coordinates**. Its mesh origin is at the gripper mount, with no fingertip/TCP
+offset. Pass the same quaternion used for IK so the marker shows the intended
+orientation; omitting it uses identity (the fingers point along world +Z). Dual
+calls accept a shared `orientation_xyzw` and per-arm overrides. The behavior
+checker supplies each arm's top-down IK orientation. To follow the robot's actual
+tool0 pose continuously, use `enable_eef_mesh_debug`.
+
+### Object contact settings
+
+Objects use a lateral friction coefficient of `0.6`, rolling/spinning friction of
+`0.005`, and disabled friction anchoring. The gripper pads keep their higher lateral
+friction (`2.5`) so the fingers can hold objects while neighbouring objects can slide
+and separate. These settings apply when objects are loaded or reused; restart the
+simulation to apply changed defaults to a new run.
+
+The previous object coefficient of `2.5` produced an object-object coefficient of
+`6.25`, because [Bullet multiplies the two surface coefficients](https://github.com/bulletphysics/bullet3/blob/master/src/BulletCollision/CollisionDispatch/btManifoldResult.cpp).
+Together with anchored friction, those settings reproduced a lifted object carrying
+a neighbouring object suspended beneath it in the pile-and-lift regression test.
+
+Optional environment overrides:
+
+| Variable | Default |
+|---|---|
+| `PB_OBJECT_LATERAL_FRICTION` | `0.6` |
+| `PB_OBJECT_ROLLING_FRICTION` | `0.005` |
+| `PB_OBJECT_SPINNING_FRICTION` | `0.005` |
 
 ## References
 
