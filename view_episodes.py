@@ -1,10 +1,11 @@
-"""Play recorded camera episodes without importing PyBullet or the grasp network."""
+"""Play or export recorded camera episodes without importing PyBullet or the grasp network."""
 
 import argparse
 from dataclasses import dataclass
 import json
 import math
 from pathlib import Path
+import tempfile
 import time
 
 import cv2
@@ -77,7 +78,7 @@ def verify_episode(episode):
     return sizes
 
 
-def make_canvas(episode, index, size=320, paused=False):
+def make_canvas(episode, index, size=320, paused=False, controls=True):
     tiles = []
     for camera, image in read_frame(episode, index).items():
         tile = cv2.resize(image, (size, size))
@@ -91,9 +92,110 @@ def make_canvas(episode, index, size=320, paused=False):
     state = "PAUSED" if paused else "END" if index == len(episode.frames) - 1 else "PLAY"
     info = f"{index + 1}/{len(episode.frames)}  t={stamp:.3f}s (simulation)  {state}  {episode.metadata['status']}"
     cv2.putText(header, info, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
-    cv2.putText(header, "Space: pause  A/D: step  R: restart  [/]: episode  Q/Esc/Ctrl+C: quit", (8, 51),
+    footer = ("Space: pause  A/D: step  R: restart  [/]: episode  Q/Esc/Ctrl+C: quit"
+              if controls else episode.path.name)
+    cv2.putText(header, footer, (8, 51),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 220, 255), 1, cv2.LINE_AA)
     return np.vstack((header, panels))
+
+
+def _write_gif(episode, path, speed, size, recording_fps):
+    """Write one frame at a time, retaining timestamp gaps without buffering RGBs."""
+    from PIL import GifImagePlugin, Image
+
+    start = episode.frames[0]["timestamp"]
+    written_centiseconds = 0
+    with path.open("wb") as stream:
+        for index, frame in enumerate(episode.frames):
+            canvas = make_canvas(episode, index, size, controls=False)
+            image = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+            image = image.quantize(colors=256)
+            if index == 0:
+                header, _ = GifImagePlugin.getheader(image, info={"loop": 0})
+                stream.writelines(header)
+            next_stamp = (episode.frames[index + 1]["timestamp"]
+                          if index + 1 < len(episode.frames)
+                          else frame["timestamp"] + 1.0 / recording_fps)
+            end_centiseconds = max(written_centiseconds + 1,
+                                   round((next_stamp - start) / speed * 100))
+            duration = end_centiseconds - written_centiseconds
+            # GIF's frame delay is an unsigned 16-bit number of centiseconds.
+            while duration:
+                delay = min(duration, 65535)
+                stream.writelines(GifImagePlugin.getdata(
+                    image, duration=delay * 10, disposal=1, include_color_table=True,
+                ))
+                duration -= delay
+            written_centiseconds = end_centiseconds
+        stream.write(b";")
+
+
+def _write_mp4(episode, path, speed, size, recording_fps):
+    """Resample recorded timestamps at 30 FPS, holding images across capture gaps."""
+    output_fps = 30.0
+    start = episode.frames[0]["timestamp"]
+    duration = (episode.frames[-1]["timestamp"] - start + 1.0 / recording_fps) / speed
+    frame_count = max(1, math.ceil(duration * output_fps - 1e-9))
+    canvas = make_canvas(episode, 0, size, controls=False)
+    height, width = canvas.shape[:2]
+    # Common MP4 encoders require even dimensions; retain odd-size panel pixels.
+    padding = (height % 2, width % 2)
+    writer = cv2.VideoWriter(
+        str(path), cv2.VideoWriter_fourcc(*"mp4v"), output_fps,
+        (width + padding[1], height + padding[0]),
+    )
+    try:
+        if not writer.isOpened():
+            raise OSError("OpenCV could not open the MP4 encoder (mp4v)")
+        index = cached_index = 0
+        for output_index in range(frame_count):
+            stamp = start + output_index / output_fps * speed
+            while (index + 1 < len(episode.frames)
+                   and episode.frames[index + 1]["timestamp"] <= stamp + 1e-9):
+                index += 1
+            if output_index == frame_count - 1:
+                index = len(episode.frames) - 1
+            if index != cached_index:
+                canvas = make_canvas(episode, index, size, controls=False)
+                cached_index = index
+            writer.write(cv2.copyMakeBorder(
+                canvas, 0, padding[0], 0, padding[1], cv2.BORDER_CONSTANT,
+            ))
+    finally:
+        writer.release()
+
+
+def export_episode(episode, output_path, speed=1.0, size=320):
+    """Export atomically; relative output paths start inside the episode folder."""
+    path = Path(output_path).expanduser()
+    if not path.is_absolute():
+        path = episode.path / path
+    suffix = path.suffix.lower()
+    if suffix not in (".mp4", ".gif"):
+        raise ValueError("--save-video output must end in .mp4 or .gif")
+    if not math.isfinite(speed) or speed <= 0 or size <= 0:
+        raise ValueError("--speed and --size must be positive")
+    if not episode.frames:
+        raise ValueError(f"Cannot export an empty episode: {episode.path}")
+    recording_fps = float(episode.metadata.get("fps", 0))
+    if not math.isfinite(recording_fps) or recording_fps <= 0:
+        raise ValueError(f"Invalid recording FPS in {episode.path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        prefix=f".{path.stem}-", suffix=suffix, dir=path.parent, delete=False,
+    ) as temporary:
+        temporary_path = Path(temporary.name)
+    try:
+        if suffix == ".gif":
+            _write_gif(episode, temporary_path, speed, size, recording_fps)
+        else:
+            _write_mp4(episode, temporary_path, speed, size, recording_fps)
+        if temporary_path.stat().st_size == 0:
+            raise OSError(f"Encoder produced an empty {suffix} file")
+        temporary_path.replace(path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+    return path
 
 
 def _wait_for_key(window, deadline=None):
@@ -164,14 +266,29 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", help="Episode folder, episode.json, or root directory containing episodes")
     parser.add_argument("--speed", type=float, default=1.0, help="Playback speed relative to recorded simulation time")
-    parser.add_argument("--size", type=int, default=320, help="Display size in pixels per camera panel")
-    parser.add_argument("--verify", action="store_true", help="Check metadata and every image without opening a GUI")
+    parser.add_argument("--size", type=int, default=320, help="Display/export size in pixels per camera panel")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--verify", action="store_true", help="Check metadata and every image without opening a GUI")
+    mode.add_argument("--save-video", metavar="OUTPUT", help="Export one episode to .mp4 or .gif without a GUI; relative output paths start inside the episode folder; respects --speed and --size")
     args = parser.parse_args(argv)
     if not math.isfinite(args.speed) or args.speed <= 0 or args.size <= 0:
         parser.error("--speed and --size must be positive")
     paths = discover_episodes(args.path)
     if not paths:
         parser.error(f"No recorded episodes found in {args.path}")
+    if args.save_video:
+        if len(paths) != 1:
+            parser.error("--save-video requires a single episode; pass its folder or episode.json")
+        try:
+            print(f"[export] {paths[0]} -> {args.save_video}")
+            output = export_episode(load_episode(paths[0]), args.save_video, args.speed, args.size)
+        except KeyboardInterrupt:
+            print("\n[export] Stopped; unfinished output discarded.")
+            return 130
+        except (OSError, ValueError, cv2.error) as exc:
+            parser.error(str(exc))
+        print(f"[export] Saved {output}")
+        return 0
     if args.verify:
         for path in paths:
             episode = load_episode(path)
@@ -180,7 +297,7 @@ def main(argv=None):
         return 0
     gui = next((line for line in cv2.getBuildInformation().splitlines() if "GUI:" in line), "")
     if "NONE" in gui:
-        parser.error("Playback needs a GUI-enabled OpenCV build; --verify also works with headless OpenCV")
+        parser.error("Playback needs a GUI-enabled OpenCV build; --verify and --save-video also work with headless OpenCV")
     index = 0
     try:
         while 0 <= index < len(paths):

@@ -313,10 +313,16 @@ status describes whether recording completed, not whether grasping succeeded.
 Ctrl+C finalizes an interrupted episode. Complete indexed frames can also be read
 if a process stops before finalizing its metadata.
 
+
+<p align="center">
+  <img src="images/episode.gif" width="400" title="">
+</p>
+
+
 View **only one specific episode** by passing its complete folder path:
 
 ```bash
-python3 view_episodes.py episodes/episode_20261017T151129389913Z_1f48b3 --speed=1 --size=320
+python3 view_episodes.py episodes/episode_20261017T151129389913Z_1f48b3 --speed=2 --size=640 
 ```
 
 Replace the example folder name with the episode you want to open. The recorder
@@ -326,16 +332,32 @@ the episode folder also works.
 To browse **all episodes** under the output directory instead, pass the parent folder:
 
 ```bash
-python3 view_episodes.py episodes --speed=1 --size=320
+python3 view_episodes.py episodes --speed=2 --size=640
+
+#or specific episode save it as a gif/mp4
+python3 view_episodes.py episodes/sample_episode   --speed=2 --size=640 --save-video=episode.gif
+
 ```
 
 `--speed` needs a number: `1` plays at normal simulation speed, `0.5` at half speed,
 and `2` at double speed. For example, `--speed=0.5` slows playback down; do not leave
 the value empty after `--speed=`.
 
+The episode viewer accepts these parameters:
+
+| Parameter | Default | Purpose |
+|---|---|---|
+| `path` | Required | Episode folder, its `episode.json`, or a parent directory containing episodes. |
+| `--speed` | `1` | Positive playback/export speed relative to recorded simulation time. |
+| `--size` | `320` | Positive size in pixels per camera panel for playback or export. |
+| `--verify` | Off | Check metadata and every saved image without opening a window. |
+| `--save-video` | Off | Export exactly one episode to an `.mp4` or `.gif` file, then exit without opening a window. Relative output paths start in the selected episode folder. |
+| `-h`, `--help` | — | Show usage and available parameters. |
+
 The viewer reads saved PNGs and metadata without loading PyBullet or the network.
-It displays the selected cameras side by side; `--size` changes display size only.
-Playback needs a GUI-enabled OpenCV build. No additional Python packages are needed
+It displays the selected cameras side by side; `--size` controls camera panels in
+playback and exported files, while the recorded PNGs retain their original resolution.
+Interactive playback needs a GUI-enabled OpenCV build. No additional Python packages are needed
 for the recording format. Controls:
 
 | Key | Action |
@@ -354,6 +376,27 @@ Verify saved images and metadata without opening a window:
 ```bash
 python3 view_episodes.py episodes --verify
 ```
+
+To export one episode as an MP4 video or animated GIF:
+
+```bash
+python3 view_episodes.py episodes/episode_20261017T151129389913Z_1f48b3 \
+  --speed=1 --size=320 --save-video=episode.mp4
+python3 view_episodes.py episodes/episode_20261017T151129389913Z_1f48b3 \
+  --speed=1 --size=320 --save-video=episode.gif
+```
+
+The examples save `episode.mp4` or `episode.gif` inside the selected episode folder.
+Relative output paths are resolved from that folder; use an absolute path to save
+elsewhere. The output suffix selects the format. Export runs headlessly and exits when the
+file is written, using OpenCV for MP4 and Pillow for GIF; no additional packages
+or system FFmpeg installation are required. Select exactly one episode when
+exporting. `--verify` and `--save-video` cannot be combined.
+
+Export uses `--speed` and the per-camera `--size`. Timestamp gaps hold the previous
+frame, and the final frame is held for one nominal recording interval. MP4
+resamples this timing to 30 FPS and pads odd output dimensions to even dimensions
+when needed. GIF keeps each recorded frame's duration, rounded to 10 milliseconds.
 
 
   - Run 'simulation.py --help' to see a full list of options.
