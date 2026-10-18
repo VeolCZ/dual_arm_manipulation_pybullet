@@ -257,6 +257,9 @@ texture choices under `scenario_metadata.domain_randomization` in `episode.json`
 
 
 ### Record episodes and review them later
+<p align="center">
+  <img src="images/episode.gif" width="800" title="">
+</p>
 
 Run these commands from the repository root. Record camera images without opening
 live camera windows:
@@ -314,9 +317,6 @@ Ctrl+C finalizes an interrupted episode. Complete indexed frames can also be rea
 if a process stops before finalizing its metadata.
 
 
-<p align="center">
-  <img src="images/episode.gif" width="800" title="">
-</p>
 
 
 View **only one specific episode** by passing its complete folder path:
