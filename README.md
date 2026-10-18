@@ -1,4 +1,4 @@
-## Coupling between Perception and Dual Arm Manipulation: Learning to Grasp Objects in Highly Cluttered Environments
+## Coupling between Perception and Dual-Arm Manipulation: Learning to Grasp Objects in Highly Cluttered Environments
 
 ###### [Hamidreza Kasaei](https://hkasaei.github.io/) | [IRL-Lab](https://www.ai.rug.nl/irl-lab)
 ##
@@ -37,7 +37,7 @@ In this assignment, we capture an RGB-D image of the scene and pass the image to
   Outputs of the GR-ConvNet network for a given image
 </p>
 
-The best grasp configuration is then selected, and we convert the grasp pose from pixel space to the robot's workspace (x, y, z, roll, pitch, yaw). We finally instruct the robot to perform a clear table task by grasping and manipulating the target object from the table to the basket. A particular grasp is recorded as a success if the object is inside the basket at the end of the experiment.  An experiment is continued until either all objects get removed from the workspace or four failures occur consecutively (the default is `--attempts=4`). Note that the system automatically reports a summary of the obtained results in the “results” folder, and the prediction of the network is visualized and saved in the “network_output” folder.
+The best grasp configuration is then selected, and we convert the grasp pose from pixel space to the robot's workspace (x, y, z, roll, pitch, yaw). We finally instruct the robot to perform a clear table task by grasping and manipulating the target object from the table to the basket. A particular grasp is ed as a success if the object is inside the basket at the end of the experiment.  An experiment is continued until either all objects get removed from the workspace or four failures occur consecutively (the default is `--attempts=4`). Note that the system automatically reports a summary of the obtained results in the “results” folder, and the prediction of the network is visualized and saved in the “network_output” folder.
 
 
 
@@ -133,7 +133,7 @@ use their defaults.
 | `--stream_async` | `true` | Display OpenCV previews in a separate process. Camera capture remains on the simulation thread; applies to the OpenCV backend. |
 | `--stream_fps` | `5` | Maximum live-preview frames per wall-clock second; must be a finite positive number. |
 | `--stream_which` | Not set (scenario cameras) | Comma-separated preview cameras: `external`, `front`, `head`, `left`, `right`. Isolated defaults to `front,left,right`; packed/pile defaults to all five. |
-| `--record_episodes` | `false` | Save camera episodes for offline playback. Works with or without the PyBullet GUI. |
+| `--_episodes` | `false` | Save camera episodes for offline playback. Works with or without the PyBullet GUI. |
 | `--record_dir` | `episodes` | Root directory for episode folders. |
 | `--record_fps` | `3` | Recording frames per simulated second; must be finite and greater than `0`, up to `240`. |
 | `--record_which` | `front,external,left,right` | Comma-separated recording cameras: `external`, `front`, `head`, `left`, `right`. |
@@ -155,7 +155,7 @@ Implement or enable those branches before running GGCNN, for example:
 
 ```bash
 python3 simulation.py --scenario=pile --network=GGCNN --runs=1 \
-  --gui=false --stream_cameras=false --device=GPU --save-network-output=true
+  --gui=true --stream_cameras=false --device=GPU --save-network-output=true
 ```
 
 GGCNN receives metric depth with its mean removed, clipped to `[-1, 1]`. Its
@@ -174,7 +174,7 @@ support; if you installed `opencv-python-headless` from `requirements.txt`, use
 OpenCV build. Do not install both OpenCV wheel variants in the same environment.
 
 ```bash
-python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=2 --save-network-output=false --stream_cameras=true --stream_backend=opencv --device=CPU --gui=true
+python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=2 --save-network-output=true --stream_cameras=true --stream_backend=opencv --device=GPU --gui=true
 ```
 
 OpenCV displays the preview in a separate process by default (`--stream_async=true`).
@@ -219,7 +219,7 @@ RGB brightness:
 ```bash
 python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=2 \
   --domain_randomization=true --domain_seed=42 \
-  --record_episodes=true --record_fps=3 --stream_cameras=false --gui=false
+  --record_episodes=true --record_fps=3 --stream_cameras=false --gui=true
 ```
 
 Domain randomization is disabled by default. Settings are sampled once per pile
