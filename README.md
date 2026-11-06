@@ -97,6 +97,16 @@ pip install -I pybullet
 
 ***Note: if anything fails with the MacOS build, please create a new issue.***
 #### Known issues
+- `pybullet installation fails`: run this command instead:
+```bash
+ conda install -c conda-forge pybullet
+```
+
+- `TypeError: 'type' object is not subscriptable`: add this import at the top of the following files: __camera.py__, __env.py__ and __simulation.py__
+```bash
+ from __future__ import annotations
+```
+
 - `TypeError: tuple indices must be integers or slices, not tuple`: check whether Numpy is enabled using the command as seen above.
 
 ## How to run experiments
