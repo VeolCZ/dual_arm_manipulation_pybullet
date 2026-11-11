@@ -43,71 +43,77 @@ The best grasp configuration is then selected, and we convert the grasp pose fro
 
 ## Requirements
 
-### Ubuntu instructions
+### Nix development environment (recommended)
 
-We have tested this repo on Ubuntu 24.04. We expect it to work on 22.04 and 20.04 as well, but we have not yet tested it.  
+The flake provides Python 3.11, uv, a C/C++ compiler, CMake, Ninja, pkg-config,
+graphics/USB runtime libraries on Linux, FFmpeg, and dataset download utilities.
+Python dependencies are managed by uv in `.venv` and pinned in `uv.lock`;
+Nix tools and libraries are pinned in `flake.lock`.
 
-Ensure you are running Python>=3.6.5 and import the required libraries by running:
-
-```bash
-cd ~
-git clone https://github.com/SeyedHamidreza/dual_arm_manipulation_pybullet.git
-cd ~/dual_arm_manipulation_pybullet
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install --upgrade pip
-pip3 install -r requirements.txt
-```
-It will install a set of packages, including: numpy, opencv-python-headless, matplotlib, scikit-image, imageio, torch, torchvision, torchsummary, tensorboardX, pyrealsense2, Pillow, pandas, matplotlib, pybullet
-
-#### Dependency notes (NumPy / OpenCV) 
-```@TODO: double check these points'''
-
-- If you see `A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x` while importing PyBullet, install a NumPy 1.x build (this repo pins `numpy<2` in `requirements.txt`).
-- If you see OpenCV errors like `Could not load the Qt platform plugin "xcb"`, use the headless OpenCV wheel (`opencv-python-headless`) and/or run without GUI windows.
-
-*Note:* On some Ubuntu setups, `pip` may refuse to install into the system Python due to PEP 668 (“externally managed environment”). Using the virtual environment commands above avoids that, or you can use ```--break-system-packages``` flag
-
-
-### MacOS ARM instructions (M1/M2/M3)
-For MacOS, please make sure to use Python 3.8. An example using Conda:
+With Nix and the `nix-command` and `flakes` features enabled, run from this
+repository's root:
 
 ```bash
-cd ~
-git clone https://github.com/SeyedHamidreza/cognitive_robotics_manipulation.git
-cd ~/cognitive_robotics_manipulation
-conda init
-conda create -n venv38 python=3.8 pip
-conda activate venv38
-python --version
-python -m pip install --upgrade pip
-pip install -r requirements-macos.txt
-pip install pybullet
-```
-It is very important that `pybullet` is built after Numpy is installed. Please check with
-```bash
-python -c "import pybullet; print('NumPy enabled:', pybullet.isNumpyEnabled())"
-```
-whether Numpy is enabled. If not, try:
-```bash
-pip uninstall pybullet
-pip cache remove pybullet
-pip install -I pybullet
+nix develop
+uv sync --locked
+uv run python simulation.py --scenario=pile --network=GR_ConvNet --runs=1 --device=CPU
 ```
 
-***Note: if anything fails with the MacOS build, please create a new issue.***
-#### Known issues
-- `pybullet installation fails`: run this command instead:
+The shell uses Nix's Python and disables uv's standalone Python downloads so
+binary wheels use the Nix loader on NixOS. Enter `nix develop` again whenever
+working on the project. The first sync needs network access to download wheels
+(and a PyBullet source build on platforms without a wheel).
+
+### Without Nix
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run:
+
 ```bash
- conda install -c conda-forge pybullet
+uv sync --locked
+uv run python simulation.py --scenario=pile --network=GR_ConvNet --runs=1 --device=CPU
 ```
 
-- `TypeError: 'type' object is not subscriptable`: add this import at the top of the following files: __camera.py__, __env.py__ and __simulation.py__
+uv installs Python 3.11 if needed and manages the virtual environment. A source
+build of PyBullet requires a C/C++ compiler and Python development headers.
+On macOS, install the Xcode command-line tools before syncing. macOS and Linux
+ARM environments have not been validated here.
+
+### Optional hardware and dependency notes
+
+The simulator does not need a RealSense camera. To use the physical camera
+utilities under `network/hardware`, install the platform-specific bindings:
+
 ```bash
- from __future__ import annotations
+uv sync --locked --extra realsense
+uv run --extra realsense python -c "import pyrealsense2"
 ```
 
-- `TypeError: tuple indices must be integers or slices, not tuple`: check whether Numpy is enabled using the command as seen above.
+RealSense wheel availability depends on the OS and architecture; the macOS
+bindings currently require Apple Silicon and macOS 15 or later. Physical camera
+access also needs the host's USB permissions/udev rules.
+
+- NumPy stays below 2 for compatibility with the existing simulation. OpenCV
+  stays below 4.12 because newer wheels require NumPy 2 on Python 3.11.
+- OpenCV uses the headless wheel. For simulation previews, use
+  `--stream_backend=matplotlib`. Interactive episode playback requires a GUI
+  OpenCV build; verification and video/GIF export work with the headless wheel.
+  To switch this environment to GUI OpenCV, run `uv remove opencv-python-headless`
+  and `uv add "opencv-python>=4.8,<4.12"`; do not install both wheel variants.
+- PyTorch uses its standard PyPI distribution, including CUDA dependencies on
+  supported Linux systems. GPU inference needs a compatible host NVIDIA driver;
+  the simulation falls back to CPU when CUDA is unavailable.
+- PyBullet source builds receive the same NumPy version as the runtime. Check
+  support with `uv run python -c "import pybullet; print(pybullet.isNumpyEnabled())"`.
+
+Run the headless test suite with:
+
+```bash
+MPLBACKEND=Agg uv run --locked python -m unittest discover -s tests
+```
+
+Use `uv add <package>` / `uv remove <package>` to change dependencies and
+`uv lock --upgrade` to refresh Python pins. Use `nix flake update` to refresh
+Nix pins. Commit the updated manifest and lockfiles together.
 
 ## How to run experiments
 We can perform a simulation experiment by running the 'simulation.py' script. As shown in the following image, we can perform experiments in three different grasping scenarios, including isolated, packed, and pile scenarios:
@@ -119,7 +125,7 @@ We can perform a simulation experiment by running the 'simulation.py' script. As
 
 ```bash
 cd ~/dual_arm_manipulation_pybullet
-python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=5
+uv run python simulation.py --scenario=pile --network=GR_ConvNet --runs=5
 ```
 
 ### Simulation parameters
@@ -164,7 +170,7 @@ but its initialization and inference branches are currently commented out.
 Implement or enable those branches before running GGCNN, for example:
 
 ```bash
-python3 simulation.py --scenario=pile --network=GGCNN --runs=1 \
+uv run python simulation.py --scenario=pile --network=GGCNN --runs=1 \
   --gui=true --device=GPU --save-network-output=true \
   --record_episodes=true --record_dir=episodes --record_fps=3 --record_which=front,external,left,right 
  
@@ -181,12 +187,12 @@ this limit; the raw predicted widths and saved network plots retain their values
 
 Camera streaming is off by default. Enable it with `--stream_cameras=true`;
 the default backend displays an OpenCV mosaic. Your OpenCV build must include GUI
-support; if you installed `opencv-python-headless` from `requirements.txt`, use
+support; if you installed `opencv-python-headless` with `uv sync`, use
 `--stream_backend=matplotlib` or replace the headless package with a GUI-enabled
 OpenCV build. Do not install both OpenCV wheel variants in the same environment.
 
 ```bash
-python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=2 --save-network-output=true --stream_cameras=true --stream_backend=opencv --device=GPU --gui=true
+uv run python simulation.py --scenario=pile --network=GR_ConvNet --runs=2 --save-network-output=true --stream_cameras=true --stream_backend=opencv --device=GPU --gui=true
 ```
 
 OpenCV displays the preview in a separate process by default (`--stream_async=true`).
@@ -229,7 +235,7 @@ Enable per-episode changes to table/floor colors, object textures, lighting, and
 RGB brightness:
 
 ```bash
-python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=2 \
+uv run python simulation.py --scenario=pile --network=GR_ConvNet --runs=2 \
   --domain_randomization=true --domain_seed=42 \
   --record_episodes=true --record_fps=3 --stream_cameras=false --gui=true
 ```
@@ -275,7 +281,7 @@ Run these commands from the repository root. Record camera images without openin
 live camera windows:
 
 ```bash
-python3 simulation.py --scenario=pile --network=GR_ConvNet --runs=2 \
+uv run python simulation.py --scenario=pile --network=GR_ConvNet --runs=2 \
   --save-network-output=false --record_episodes=true --record_dir=episodes \
   --record_fps=3 --record_which=front,external,left,right \
   --stream_cameras=false --device=CPU --gui=true
@@ -332,7 +338,7 @@ if a process stops before finalizing its metadata.
 View **only one specific episode** by passing its complete folder path:
 
 ```bash
-python3 view_episodes.py episodes/episode_20261017T151129389913Z_1f48b3 --speed=2 --size=640 
+uv run python view_episodes.py episodes/episode_20261017T151129389913Z_1f48b3 --speed=2 --size=640
 ```
 
 Replace the example folder name with the episode you want to open. The recorder
@@ -342,10 +348,10 @@ the episode folder also works.
 To browse **all episodes** under the output directory instead, pass the parent folder:
 
 ```bash
-python3 view_episodes.py episodes --speed=2 --size=640
+uv run python view_episodes.py episodes --speed=2 --size=640
 
 #or specific episode save it as a gif/mp4
-python3 view_episodes.py episodes/sample_episode   --speed=2 --size=640 --save-video=episode.gif
+uv run python view_episodes.py episodes/sample_episode   --speed=2 --size=640 --save-video=episode.gif
 
 ```
 
@@ -384,15 +390,15 @@ events. The viewer closes its windows when interrupted.
 Verify saved images and metadata without opening a window:
 
 ```bash
-python3 view_episodes.py episodes --verify
+uv run python view_episodes.py episodes --verify
 ```
 
 To export one episode as an MP4 video or animated GIF:
 
 ```bash
-python3 view_episodes.py episodes/episode_20261017T151129389913Z_1f48b3 \
+uv run python view_episodes.py episodes/episode_20261017T151129389913Z_1f48b3 \
   --speed=1 --size=320 --save-video=episode.mp4
-python3 view_episodes.py episodes/episode_20261017T151129389913Z_1f48b3 \
+uv run python view_episodes.py episodes/episode_20261017T151129389913Z_1f48b3 \
   --speed=1 --size=320 --save-video=episode.gif
 ```
 
@@ -454,13 +460,13 @@ Here is a screenshot of the result:
 and dual-arm variant by default:
 
 ```bash
-python3 test_behaviours.py
+uv run python test_behaviours.py
 ```
 
 For a faster run without GUI rendering or pauses between checks:
 
 ```bash
-python3 test_behaviours.py --vis=false --sleep=0
+uv run python test_behaviours.py --vis=false --sleep=0
 ```
 
 Each check reports `PASS`, `FAIL`, or `SKIP`, followed by a summary. Failures return
