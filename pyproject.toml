@@ -1,0 +1,38 @@
+[project]
+name = "dual-arm-manipulation-pybullet"
+version = "0.1.0"
+description = "RGB-D grasp perception and dual-arm manipulation in PyBullet"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "attrdict3>=2.0.2",
+    "imageio>=2.31",
+    "matplotlib>=3.8",
+    "numpy>=1.26,<2",
+    # OpenCV 4.12+ requires NumPy 2 on Python 3.11.
+    "opencv-python-headless>=4.8,<4.12",
+    "pandas>=2.1",
+    "pillow>=10",
+    "pybullet>=3.2",
+    "python-dateutil>=2.8.2",
+    "scikit-image>=0.22,<0.25",
+    "scikit-learn>=1.4,<1.6",
+    "scipy>=1.11",
+    "tensorboardX>=2.6",
+    "torch>=2.2",
+    "torchsummary>=1.5.1",
+    "torchvision>=0.17",
+]
+
+[project.optional-dependencies]
+realsense = [
+    "pyrealsense2>=2.54; sys_platform == 'linux' or sys_platform == 'win32'",
+    "pyrealsense2-macosx>=2.54; sys_platform == 'darwin'",
+]
+
+[tool.uv]
+package = false
+
+# Source builds (notably macOS PyBullet) must enable NumPy support too.
+[tool.uv.extra-build-dependencies]
+pybullet = [{ requirement = "numpy", match-runtime = true }]

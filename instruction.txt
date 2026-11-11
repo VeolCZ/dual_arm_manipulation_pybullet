@@ -1,8 +1,7 @@
-sudo apt install python-is-python3
+Run from the repository root (see README.md for platform and hardware notes):
 
-sudo apt update
-sudo apt install -y python3-pip ffmpeg
-python3 -m pip install --user pybullet --break-system-packages
-python3 -m pip install --user attrdict --break-system-packages
-python3 -m pip install --user gtts --break-system-packages
-python3 -m pip install --user pydub --break-system-packages
+nix develop
+uv sync --locked
+uv run python simulation.py --device=CPU
+
+Without Nix, install uv first and run the same uv commands.

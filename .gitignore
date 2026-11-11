@@ -6,3 +6,6 @@ __pycache__
 .vscode/*
 results/*
 episodes/
+.venv/
+result
+result-*
