@@ -545,17 +545,20 @@ Optional environment overrides:
 - Add a param to save/not save the results
 - Objects disappear after several runs, check the potential reasons. You can press W to see the simulation in CAD mode
 
-Restricted Educational Use License
-This repository is provided exclusively for educational purposes within the Cognitive Robotics course.
+
+## License and Usage Restrictions
+
+**Copyright © 2026 Hamidreza Kasaei. All rights reserved.**
+
+This repository is provided exclusively for educational purposes within the **Cognitive Robotics** course.
 Authorized students may clone, run, and modify the code for course assignments.
-Without prior written permission, users are not permitted to:
 
+**Without prior written permission, users are not permitted to:**
 - Make the code publicly available.
-
 - Share, redistribute, or publish the code.
-
 - Incorporate the code into other projects.
 
-For permission requests, contact hamidreza.kasaei@rug.nl.
+For permission requests, contact **Hamidreza Kasaei** at [hamidreza.kasaei@rug.nl](mailto:hamidreza.kasaei@rug.nl).
 
 By accessing or using this repository, users agree to these terms.
+
